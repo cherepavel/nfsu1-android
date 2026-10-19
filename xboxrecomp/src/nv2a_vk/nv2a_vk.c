@@ -132,6 +132,11 @@ static VkDeviceSize     s_ubo_align = 256;
 static uint32_t         s_ubo_range = 16384;
 static VkFormat         s_depth_fmt = VK_FORMAT_D24_UNORM_S8_UINT;
 static int              s_have_bc, s_have_depth_clamp;
+/* Opt-in GPU queue timestamps. Intervals include queue bubbles, not just
+ * shader occupancy; no extra submit, fence wait or query WAIT bit is used. */
+static float s_gpu_period;
+static uint32_t s_gpu_bits;
+static int s_gpu_profile;
 
 static PFN_vkCmdPushDescriptorSetKHR  p_push_desc;
 static PFN_vkCmdSetVertexInputEXT     p_vertex_input;
@@ -204,6 +209,8 @@ static VkDeviceMemory alloc_mem(VkMemoryRequirements rq, VkMemoryPropertyFlags w
 
 #define VK_FRAMES 2
 #define VK_CBS 8
+#define GPU_PASS_LIMIT 64
+#define GPU_QUERY_COUNT (3 + GPU_PASS_LIMIT * 2)
 #define RING_BYTES (48u << 20)
 
 typedef struct {
@@ -221,6 +228,11 @@ typedef struct {
     uint8_t        *ring_ptr;
     VkDeviceSize    ring_off;
     int             submitted;
+    VkQueryPool     gpu_queries;
+    uint32_t gpu_passes, gpu_barriers, gpu_blits;
+    uint32_t gpu_pass_count;
+    int gpu_active_pass;
+    struct { uint32_t target, width, height; uint64_t draws, indices; } gpu_targets[GPU_PASS_LIMIT];
     Garbage        *garbage;
     uint32_t        ngarbage, garbage_cap;
 #ifdef __ANDROID__
@@ -280,6 +292,84 @@ static void garbage_free(Frame *f)
     f->ngarbage = 0;
 }
 
+static void gpu_report(Frame *f)
+{
+    static uint64_t count, last;
+    static double game_sum, present_sum, game_max, present_max;
+    static uint64_t passes, barriers, blits;
+    static struct { uint32_t target, width, height; uint64_t calls, draws, indices; double ms; } targets[GPU_PASS_LIMIT];
+    static double overflow_ms;
+    uint64_t ticks[3];
+    if (!f->gpu_queries || vkGetQueryPoolResults(s_dev, f->gpu_queries,
+            0, 3, sizeof ticks, ticks, sizeof ticks[0], VK_QUERY_RESULT_64_BIT) != VK_SUCCESS)
+        return;
+    uint64_t mask = s_gpu_bits >= 64 ? UINT64_MAX : (1ull << s_gpu_bits) - 1;
+    double game = ((ticks[1] - ticks[0]) & mask) * (double)s_gpu_period / 1e6;
+    double present = ((ticks[2] - ticks[1]) & mask) * (double)s_gpu_period / 1e6;
+    game_sum += game;
+    present_sum += present;
+    if (game > game_max) game_max = game;
+    if (present > present_max) present_max = present;
+    count++;
+    passes += f->gpu_passes;
+    barriers += f->gpu_barriers;
+    blits += f->gpu_blits;
+    uint64_t pass_ticks[GPU_PASS_LIMIT * 2];
+    if (f->gpu_pass_count && vkGetQueryPoolResults(s_dev, f->gpu_queries,
+            3, f->gpu_pass_count * 2, sizeof pass_ticks, pass_ticks,
+            sizeof pass_ticks[0], VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+        for (uint32_t i = 0; i < f->gpu_pass_count; i++) {
+            double ms = ((pass_ticks[i * 2 + 1] - pass_ticks[i * 2]) & mask)
+                * (double)s_gpu_period / 1e6;
+            uint32_t j;
+            for (j = 0; j < GPU_PASS_LIMIT; j++) {
+                if (!targets[j].calls) {
+                    targets[j].target = f->gpu_targets[i].target;
+                    targets[j].width = f->gpu_targets[i].width;
+                    targets[j].height = f->gpu_targets[i].height;
+                    break;
+                }
+                if (targets[j].target == f->gpu_targets[i].target
+                    && targets[j].width == f->gpu_targets[i].width
+                    && targets[j].height == f->gpu_targets[i].height) break;
+            }
+            if (j == GPU_PASS_LIMIT) overflow_ms += ms;
+            else {
+                targets[j].calls++;
+                targets[j].ms += ms;
+                targets[j].draws += f->gpu_targets[i].draws;
+                targets[j].indices += f->gpu_targets[i].indices;
+            }
+        }
+    }
+    uint64_t now = hz_now();
+    if (!last) last = now;
+    if (now - last >= 5000000000ull) {
+        NFS_LOG_INFO("performance", "[GPU5] frames=%llu game_ms=%.3f game_max_ms=%.3f present_ms=%.3f present_max_ms=%.3f passes=%.1f full_barriers=%.1f blits=%.1f\n",
+            (unsigned long long)count, game_sum / count, game_max,
+            present_sum / count, present_max, (double)passes / count,
+            (double)barriers / count, (double)blits / count);
+        for (unsigned rank = 0; rank < 5; rank++) {
+            unsigned best = GPU_PASS_LIMIT;
+            for (unsigned j = 0; j < GPU_PASS_LIMIT; j++)
+                if (targets[j].calls && (best == GPU_PASS_LIMIT || targets[j].ms > targets[best].ms)) best = j;
+            if (best == GPU_PASS_LIMIT) break;
+            NFS_LOG_INFO("performance", "[GPUPASS] rank=%u target=%08X size=%ux%u ms_per_frame=%.3f calls_per_frame=%.1f draws_per_frame=%.1f indices_per_frame=%.0f\n",
+                rank + 1, targets[best].target, targets[best].width, targets[best].height,
+                targets[best].ms / count, (double)targets[best].calls / count,
+                (double)targets[best].draws / count, (double)targets[best].indices / count);
+            targets[best].calls = 0;
+        }
+        if (overflow_ms > 0)
+            NFS_LOG_INFO("performance", "[GPUPASS] overflow_ms_per_frame=%.3f\n", overflow_ms / count);
+        memset(targets, 0, sizeof targets);
+        overflow_ms = 0;
+        count = passes = barriers = blits = 0;
+        game_sum = present_sum = game_max = present_max = 0;
+        last = now;
+    }
+}
+
 static void frame_begin(void)
 {
     VkCommandBufferBeginInfo bi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
@@ -288,9 +378,13 @@ static void frame_begin(void)
         uint64_t perf_fence = nfsu_perf_begin();
         vkWaitForFences(s_dev, 1, &s_f->fence, VK_TRUE, UINT64_MAX);
         nfsu_perf_end(NFSU_PERF_VK_FENCE, perf_fence);
+        gpu_report(s_f);
         vkResetFences(s_dev, 1, &s_f->fence);
         s_f->submitted = 0;
     }
+    s_f->gpu_passes = s_f->gpu_barriers = s_f->gpu_blits = 0;
+    s_f->gpu_pass_count = 0;
+    s_f->gpu_active_pass = -1;
     garbage_free(s_f);
     s_f->ring_off = 0;
     s_ring_gen++;
@@ -299,6 +393,10 @@ static void frame_begin(void)
     s_f->ncb = 0;
     s_cb = s_f->cbs[0];
     vkBeginCommandBuffer(s_cb, &bi);
+    if (s_f->gpu_queries) {
+        vkCmdResetQueryPool(s_cb, s_f->gpu_queries, 0, GPU_QUERY_COUNT);
+        vkCmdWriteTimestamp(s_cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, s_f->gpu_queries, 0);
+    }
     s_cb_gen++;
     s_dyn_valid = 0;
     s_kick_draws = 0;
@@ -406,6 +504,7 @@ static VkDepthBuf *s_rt_depth;
 
 static void barrier_all(void)
 {
+    if (s_f->gpu_queries) s_f->gpu_barriers++;
     VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER };
     int i;
     mb.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
@@ -420,6 +519,11 @@ static void end_rendering(void)
 {
     if (s_in_render) {
         p_end_rendering(s_cb);
+        if (s_f->gpu_queries && s_f->gpu_active_pass >= 0) {
+            vkCmdWriteTimestamp(s_cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                s_f->gpu_queries, 4 + (uint32_t)s_f->gpu_active_pass * 2);
+            s_f->gpu_active_pass = -1;
+        }
         s_in_render = 0;
     }
 }
@@ -490,6 +594,19 @@ static void begin_rendering(VkSurf *s, VkDepthBuf *d)
         da.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         ri.pDepthAttachment = &da;
         ri.pStencilAttachment = &da;
+    }
+    if (s_f->gpu_queries) {
+        s_f->gpu_passes++;
+        if (s_f->gpu_pass_count < GPU_PASS_LIMIT) {
+            uint32_t slot = s_f->gpu_pass_count++;
+            s_f->gpu_targets[slot].draws = s_f->gpu_targets[slot].indices = 0;
+            s_f->gpu_targets[slot].target = s->va;
+            s_f->gpu_targets[slot].width = ri.renderArea.extent.width;
+            s_f->gpu_targets[slot].height = ri.renderArea.extent.height;
+            s_f->gpu_active_pass = (int)slot;
+            vkCmdWriteTimestamp(s_cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                s_f->gpu_queries, 3 + slot * 2);
+        }
     }
     p_begin_rendering(s_cb, &ri);
     s_in_render = 1;
@@ -710,6 +827,7 @@ static void rescale_surfaces(double k)
         bl.dstOffsets[1].x = (int32_t)pw;
         bl.dstOffsets[1].y = (int32_t)ph;
         bl.dstOffsets[1].z = 1;
+        if (s_f->gpu_queries) s_f->gpu_blits++;
         vkCmdBlitImage(s_cb, s->image, VK_IMAGE_LAYOUT_GENERAL, img,
                        VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
         garbage_add(s->image, s->view, s->mem);
@@ -1035,6 +1153,7 @@ static void gen_mips(VkImage img, uint32_t w, uint32_t h, uint32_t levels, uint3
         bl.dstOffsets[1].x = (int32_t)w;
         bl.dstOffsets[1].y = (int32_t)h;
         bl.dstOffsets[1].z = 1;
+        if (s_f->gpu_queries) s_f->gpu_blits++;
         vkCmdBlitImage(s_cb, img, VK_IMAGE_LAYOUT_GENERAL, img,
                        VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
     }
@@ -1364,6 +1483,7 @@ static VkImageView cube_from_surfaces(uint32_t va, uint32_t w, uint32_t h, uint3
         bl.dstOffsets[1].x = (int32_t)size;
         bl.dstOffsets[1].y = (int32_t)size;
         bl.dstOffsets[1].z = 1;
+        if (s_f->gpu_queries) s_f->gpu_blits++;
         vkCmdBlitImage(s_cb, sf->image, VK_IMAGE_LAYOUT_GENERAL, c->image,
                        VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
         c->src[f] = sf;
@@ -1950,10 +2070,12 @@ static VkProg *prog_get(const Nv2aRawBatch *b, const Nv2aPshKey *pk)
     return p;
 }
 
+#include "nv2a_vk_zero_source.h"
 typedef struct {
     int      prog;
     uint32_t blend, bsrc, bdst, beq, cmask, depth, topo;
 #ifdef __ANDROID__
+    uint32_t alpha_test, zero_source; /* fragment specialization constants, VkBool32 */
     uint32_t state[11], strides[16], formats[16];
 #endif
 } PipeKey;
@@ -2110,6 +2232,12 @@ static VkPipeline pipe_get(const PipeKey *k)
     st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
     st[1].module = p->fs;
     st[1].pName = "main";
+#ifdef __ANDROID__
+    VkBool32 specialization_values[2] = {k->alpha_test, k->zero_source};
+    VkSpecializationMapEntry entries[2] = {{0, 0, sizeof(VkBool32)}, {1, sizeof(VkBool32), sizeof(VkBool32)}};
+    VkSpecializationInfo specialization = {2, entries, sizeof specialization_values, specialization_values};
+    st[1].pSpecializationInfo = &specialization;
+#endif
     ia.topology = k->topo == 0 ? VK_PRIMITIVE_TOPOLOGY_POINT_LIST
                 : k->topo == 1 ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST
                                : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -2605,6 +2733,7 @@ static int ready(void)
     vkGetPhysicalDeviceProperties(s_pd, &pp);
     NFS_LOG_INFO("graphics", "  [VK] %s, Vulkan %u.%u.%u\n", pp.deviceName, VK_API_VERSION_MAJOR(pp.apiVersion),
             VK_API_VERSION_MINOR(pp.apiVersion), VK_API_VERSION_PATCH(pp.apiVersion));
+    s_gpu_period = pp.limits.timestampPeriod;
     s_ubo_align = pp.limits.minUniformBufferOffsetAlignment;
     s_ubo_range = pp.limits.maxUniformBufferRange;
     {
@@ -2695,6 +2824,18 @@ static int ready(void)
     }
 #endif
 
+    {
+        const char *profile = getenv("RECOMP_VK_GPU_PROFILE");
+#ifdef __ANDROID__
+        char property[PROP_VALUE_MAX];
+        if (!profile && __system_property_get("debug.nfsu.gpu_profile", property) > 0)
+            profile = property;
+#endif
+        s_gpu_bits = qf[s_qfam].timestampValidBits;
+        s_gpu_profile = profile && strcmp(profile, "1") == 0 && s_gpu_bits && s_gpu_period > 0;
+        NFS_LOG_INFO("graphics", "[GPU] timestamps=%d valid_bits=%u period_ns=%g\n",
+            s_gpu_profile, s_gpu_bits, (double)s_gpu_period);
+    }
     qci.queueFamilyIndex = s_qfam;
     qci.queueCount = 1;
     qci.pQueuePriorities = &prio;
@@ -2808,6 +2949,15 @@ static int ready(void)
         cai.commandBufferCount = VK_CBS;
         if (vkAllocateCommandBuffers(s_dev, &cai, f->cbs) != VK_SUCCESS)
             return 0;
+        if (s_gpu_profile) {
+            VkQueryPoolCreateInfo qi = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+            qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+            qi.queryCount = GPU_QUERY_COUNT;
+            if (vkCreateQueryPool(s_dev, &qi, NULL, &f->gpu_queries) != VK_SUCCESS) {
+                f->gpu_queries = VK_NULL_HANDLE;
+                NFS_LOG_WARN("graphics", "[GPU] timestamp pool unavailable\n");
+            }
+        }
         vkCreateFence(s_dev, &fci, NULL, &f->fence);
         vkCreateSemaphore(s_dev, &sci, NULL, &f->acquired);
 #ifndef __ANDROID__
@@ -3369,6 +3519,14 @@ static struct {
 static int s_inst_on = -1, s_inst_alt;
 static uint32_t s_st_draws, s_st_calls, s_st_inst, s_st_creuse;
 
+static void gpu_count_draw(uint32_t indices, uint32_t instances)
+{
+    if (!s_f->gpu_queries || s_f->gpu_active_pass < 0) return;
+    unsigned slot = (unsigned)s_f->gpu_active_pass;
+    s_f->gpu_targets[slot].draws++;
+    s_f->gpu_targets[slot].indices += (uint64_t)indices * instances;
+}
+
 static void pend_flush(void)
 {
     if (!s_pend.on)
@@ -3376,6 +3534,7 @@ static void pend_flush(void)
     s_pend.on = 0;
     if (s_pend.cb_gen != s_cb_gen)
         return;                                 /* cannot happen: flushes go first */
+    gpu_count_draw(s_pend.n, s_pend.count);
     vkCmdDrawIndexed(s_cb, s_pend.n, s_pend.count, 0, 0, 0);
     s_st_calls++;
 }
@@ -3451,6 +3610,7 @@ static void pend_hold(const Nv2aRawBatch *b, uint32_t n, VkDeviceSize cat, uint3
         if (!s_pend.idx) {
             s_pend.idx_cap = 0;
             s_pend.on = 0;
+            gpu_count_draw(n, 1);
             vkCmdDrawIndexed(s_cb, n, 1, 0, 0, 0);
             s_st_calls++;
             return;
@@ -3608,6 +3768,29 @@ static void vk_draw_raw_impl(const Nv2aRawBatch *b)
     if (!upload_vertices(b)) return;
     static const uint32_t offsets[11] = {0x308,0x39C,0x3A0,0x30C,0x35C,0x354,0x32C,0x370,0x374,0x378,0x364};
     key.topo = topo;
+    {
+        static int zero_source = -1;
+        if (zero_source < 0) {
+            char property[PROP_VALUE_MAX] = {0};
+            __system_property_get("debug.nfsu.zero_source", property);
+            zero_source = strcmp(property, "1") == 0;
+            NFS_LOG_INFO("graphics", "[VK] zero source specialization=%d (experimental)\n", zero_source);
+        }
+        key.zero_source = zero_source && zero_source_safe(r[0x304/4], r[0x344/4],
+            r[0x348/4], r[0x350/4], r[0x300/4], r[0x33C/4], p->pkey.shader_program);
+    }
+    {
+        static int specialize = -1;
+        if (specialize < 0) {
+            char property[PROP_VALUE_MAX] = {0};
+            __system_property_get("debug.nfsu.alpha_specialize", property);
+            specialize = strcmp(property, "1") == 0;
+            NFS_LOG_INFO("graphics", "[VK] alpha specialization=%d (experimental)\n", specialize);
+        }
+        /* Preserve the existing uniform test unless this draw unconditionally
+         * passes. CLIP_PLANE discards remain independent of this constant. */
+        key.alpha_test = !specialize || (r[0x300 / 4] && r[0x33C / 4] != 0x207);
+    }
     for (i = 0; i < 11; i++) key.state[i] = r[offsets[i] / 4];
     for (i = 0; i < 16; i++) {
         key.strides[i] = android_bindings[i].stride;
@@ -3754,6 +3937,7 @@ static void vk_draw_raw_impl(const Nv2aRawBatch *b)
     if (pend_eligible(b) && inst_room > 1) {
         pend_hold(b, n, ub[2].offset, inst_room);
     } else {
+        gpu_count_draw(n, 1);
         vkCmdDrawIndexed(s_cb, n, 1, 0, 0, 0);
         s_st_calls++;
     }
@@ -4134,6 +4318,7 @@ static int present_fxaa(VkSurf *s, VkImage dst, VkImageView dview, VkFormat fmt,
     ri.layerCount = 1;
     ri.colorAttachmentCount = 1;
     ri.pColorAttachments = &ca;
+    if (s_f->gpu_queries) s_f->gpu_passes++;
     p_begin_rendering(s_cb, &ri);
     vkCmdBindPipeline(s_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
     vkCmdSetViewport(s_cb, 0, 1, &vp);
@@ -4311,6 +4496,32 @@ static void vk_flip_impl(void)
             rescale_surfaces(k);
         }
     }
+#ifdef __ANDROID__
+    /* One-shot developer snapshot. Readback deliberately stalls; never use
+     * this frame/window as a performance sample. No guest state is changed. */
+    {
+        static int targets_dumped;
+        if (!targets_dumped && s_frame % 300 == 0) {
+            char property[PROP_VALUE_MAX] = {0};
+            __system_property_get("debug.nfsu.dump_targets", property);
+            if (strcmp(property, "1") == 0) {
+                targets_dumped = 1;
+                for (unsigned i = 0; i < VK_MAX_SURF; i++) {
+                    VkSurf *target = &s_surf[i];
+                    if (!target->image || s_frame - target->used > 1) continue;
+                    char path[160];
+                    snprintf(path, sizeof path, "logs/target-%08X-%ux%u.bmp",
+                        target->va, target->pw, target->ph);
+                    NFS_LOG_INFO("graphics", "[TARGETDUMP] %s guest=%ux%u aa=%ux%u\n",
+                        path, target->w, target->h, target->aa_sx, target->aa_sy);
+                    barrier_all();
+                    dump_surface(target, path);
+                }
+                NFS_LOG_INFO("graphics", "[TARGETDUMP] complete frame=%u\n", s_frame);
+            }
+        }
+    }
+#endif
     if (s && s_drew_any && dump_every && ((s_frame % (uint32_t)dump_every) == 0
                                           || (s_inst_alt && s_frame % (uint32_t)dump_every == 1))) {
         char path[320];
@@ -4324,6 +4535,8 @@ static void vk_flip_impl(void)
     }
     barrier_all();
 
+    if (s_f->gpu_queries)
+        vkCmdWriteTimestamp(s_cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, s_f->gpu_queries, 1);
     VT("flip %u: surface %08X drew %d, acquiring\n", s_frame, s ? s->va : 0, s_drew_any);
 #ifdef __ANDROID__
     if (!s_headless) android_prepare_presentation();
@@ -4402,6 +4615,7 @@ static void vk_flip_impl(void)
                 bl.dstOffsets[1].x = dx + dw;
                 bl.dstOffsets[1].y = dy + dh;
                 bl.dstOffsets[1].z = 1;
+                if (s_f->gpu_queries) s_f->gpu_blits++;
                 vkCmdBlitImage(s_cb, s->image, VK_IMAGE_LAYOUT_GENERAL, dst,
                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bl, VK_FILTER_LINEAR);
             }
@@ -4414,6 +4628,8 @@ static void vk_flip_impl(void)
         presented:;
         }
     }
+    if (s_f->gpu_queries)
+        vkCmdWriteTimestamp(s_cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, s_f->gpu_queries, 2);
     VT("flip %u: submit (image %d)\n", s_frame, have_image);
     vkEndCommandBuffer(s_cb);
     si.commandBufferCount = 1;

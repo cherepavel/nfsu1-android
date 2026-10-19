@@ -295,6 +295,8 @@ int nv2a_gl_psh(const Nv2aPshKey *k, char *buf, size_t cap)
          * samplerCube for a CUBE_MAP stage. */
         emit(&o,
             "#version 450\n"
+            "layout(constant_id = 0) const bool nfsu_alpha_test = true;\n"
+            "layout(constant_id = 1) const bool nfsu_zero_source = false;\n"
             "layout(location = 0) in vec4 vD0; layout(location = 1) in vec4 vD1;\n"
             "layout(location = 2) in vec4 vT0; layout(location = 3) in vec4 vT1;\n"
             "layout(location = 4) in vec4 vT2; layout(location = 5) in vec4 vT3;\n"
@@ -327,6 +329,8 @@ int nv2a_gl_psh(const Nv2aPshKey *k, char *buf, size_t cap)
         "uniform int u_alpha_func; uniform float u_alpha_ref;\n"
         "out vec4 fragColor;\n"
         "void main() {\n");
+    if (nv2a_shader_vk)
+        emit(&o, "    if (nfsu_zero_source) { fragColor = vec4(0.0); return; }\n");
     for (i = 0; i < 4; i++)
         tex_fetch(&o, (int)i, (k->shader_program >> (5 * i)) & 0x1F, k);
     emit(&o,
@@ -357,8 +361,10 @@ int nv2a_gl_psh(const Nv2aPshKey *k, char *buf, size_t cap)
         emit(&o, "    float fG = "); final_input(&o, cw1 >> 8, 1, k); emit(&o, ";\n");
         emit(&o, "    fragColor = vec4(fA * fB + (1.0 - fA) * fC + fD, fG);\n");
     }
+    emit(&o, "    fragColor = clamp(fragColor, 0.0, 1.0);\n");
+    if (nv2a_shader_vk)
+        emit(&o, "    if (nfsu_alpha_test) {\n");
     emit(&o,
-        "    fragColor = clamp(fragColor, 0.0, 1.0);\n"
         "    float ar = fragColor.a * 255.0;\n"
         "    bool pass = true;\n"
         "    if (u_alpha_func == 0x200) pass = false;\n"
@@ -368,7 +374,9 @@ int nv2a_gl_psh(const Nv2aPshKey *k, char *buf, size_t cap)
         "    else if (u_alpha_func == 0x204) pass = ar >  u_alpha_ref;\n"
         "    else if (u_alpha_func == 0x205) pass = ar != u_alpha_ref;\n"
         "    else if (u_alpha_func == 0x206) pass = ar >= u_alpha_ref;\n"
-        "    if (!pass) discard;\n"
-        "}\n");
+        "    if (!pass) discard;\n");
+    if (nv2a_shader_vk)
+        emit(&o, "    }\n");
+    emit(&o, "}\n");
     return o.overflow ? -1 : (int)(cap - o.left);
 }
