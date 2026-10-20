@@ -292,12 +292,13 @@ void recomp_preempt(void);
 #include <sched.h>
 void recomp_spin_wake(void);        /* runtime: wake the hardware threads */
 void recomp_spin_yield(void);       /* runtime: yield, and the guest lock with it */
+void recomp_spin_yield_at(uint32_t pc, uint32_t ax, uint32_t cx, uint32_t dx, uint32_t si);
 /* At every lifted function entry: yield if another guest thread has been
  * waiting for the guest lock (kernel_bridge.c). One load when nobody is. */
 extern volatile int g_gil_contended;
 void recomp_preempt(void);
 #define RECOMP_PREEMPT() do { if (__builtin_expect(__atomic_load_n(&g_gil_contended, __ATOMIC_RELAXED), 0)) recomp_preempt(); } while (0)
-static inline void recomp_spin_hint(void)
+static inline void recomp_spin_hint_at(uint32_t pc, uint32_t ax, uint32_t cx, uint32_t dx, uint32_t si)
 {
     static RECOMP_TLS unsigned turns;
 #if defined(__aarch64__)
@@ -308,9 +309,15 @@ static inline void recomp_spin_hint(void)
     if ((++turns & 15u) == 0)
         recomp_spin_wake();         /* someone is waiting: answer now */
     if ((turns & 63u) == 0)
-        recomp_spin_yield();        /* lets other guest threads and ISRs run */
+        recomp_spin_yield_at(pc, ax, cx, dx, si);
 }
+static inline void recomp_spin_hint(void) { recomp_spin_hint_at(0, 0, 0, 0, 0); }
 #define RECOMP_SPIN_HINT() recomp_spin_hint()
+#define RECOMP_SPIN_HINT_AT(pc) recomp_spin_hint_at((pc), g_eax, g_ecx, g_edx, g_esi)
+#endif
+
+#ifndef RECOMP_SPIN_HINT_AT
+#define RECOMP_SPIN_HINT_AT(pc) RECOMP_SPIN_HINT()
 #endif
 
 #include <setjmp.h>

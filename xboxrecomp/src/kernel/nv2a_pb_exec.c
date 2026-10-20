@@ -38,6 +38,10 @@
 #include "../d3d/d3d8_swizzle.h"
 #include "../d3d/d3d8_dxt.h"
 #include "nv2a_backend.h"
+#ifdef __ANDROID__
+#include "nv2a_fence_wait.h"
+static Nv2aFenceWait s_fence_wait = NV2A_FENCE_WAIT_INITIALIZER;
+#endif
 
 extern ptrdiff_t xbox_GetMemoryOffset(void);
 extern void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch);
@@ -434,7 +438,28 @@ static float reg_f(uint32_t method) { float f; memcpy(&f, &s_reg[method / 4], 4)
 
 static uint32_t s_sem_va;
 static uint32_t s_vtx_epoch;            /* Nv2aRawBatch.vtx_epoch */
-void nv2a_pb_set_semaphore_target(uint32_t guest_va) { s_sem_va = guest_va; }
+void nv2a_pb_set_semaphore_target(uint32_t guest_va)
+{
+#ifdef __ANDROID__
+    __atomic_store_n(&s_sem_va, guest_va, __ATOMIC_RELEASE);
+#else
+    s_sem_va = guest_va;
+#endif
+}
+
+int nv2a_pb_wait_semaphore(uint32_t guest_va, uint32_t submitted, uint32_t delta)
+{
+#ifdef __ANDROID__
+    if (!guest_va || (guest_va & 3u)
+            || guest_va != __atomic_load_n(&s_sem_va, __ATOMIC_ACQUIRE)) return 0;
+    uint32_t *word = (uint32_t *)((uint8_t *)xbox_GetMemoryOffset() + guest_va);
+    nv2a_fence_wait(&s_fence_wait, word, submitted, delta, 1000000L);
+    return 1;
+#else
+    (void)guest_va; (void)submitted; (void)delta;
+    return 0;
+#endif
+}
 
 /* Slot + 1 of each method in s_unhandled: this runs millions of times a
  * second, so no search. The report sorts s_unhandled and rebuilds it. */
@@ -4068,12 +4093,22 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
     /* BACK_END_WRITE_SEMAPHORE_RELEASE. The title's pointer already names the
      * semaphore word; SET_SEMAPHORE_OFFSET is not added (in X-Men Legends it
      * held 0xFF000000 at times, which put the write outside guest memory). */
-    if (method == 0x1D70)
+    if (method == 0x1D70) {
         s_vtx_epoch++;
-    if (method == 0x1D70 && s_sem_va) {
-        uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
-        *(volatile uint32_t *)(mem + s_sem_va) = param;
-        return;
+#ifdef __ANDROID__
+        uint32_t sem_va = __atomic_load_n(&s_sem_va, __ATOMIC_ACQUIRE);
+#else
+        uint32_t sem_va = s_sem_va;
+#endif
+        if (sem_va) {
+            uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
+#ifdef __ANDROID__
+            nv2a_fence_publish(&s_fence_wait, (uint32_t *)(mem + sem_va), param);
+#else
+            *(volatile uint32_t *)(mem + sem_va) = param;
+#endif
+            return;
+        }
     }
     /* The pattern object's SET_MONOCHROME_COLOR0 (0x0310) latches into
      * NV_PGRAPH_PATT_COLOR0 (0xFD400B10), and stock XDK D3D uses exactly that

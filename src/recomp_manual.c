@@ -329,6 +329,7 @@ void sub_001B3640(void) { crt_memmove(); }
 #define NFSU2_D3D_DEVICE_PTR 0x001DE9E8u
 extern void nv2a_pb_set_semaphore_target(uint32_t guest_va);
 extern void sub_001D0340_gen(void);
+extern void nfsu_d3d_fence_wait_init(void);
 
 void sub_001D0340(void)
 {
@@ -339,6 +340,7 @@ void sub_001D0340(void)
     if (exec < 0)
         exec = getenv("RECOMP_PB_EXEC") != NULL;
     if (exec) {
+        nfsu_d3d_fence_wait_init();
         static uint32_t registered;
         if (sem && sem != registered) {
             nv2a_pb_set_semaphore_target(sem);

@@ -25,6 +25,7 @@
  *   different parameter layouts (pointer vs value), so each needs its own bridge.
  */
 #include "../../include/nfsu_log.h"
+#include "../../include/recomp_spin_wait.h"
 
 #include "kernel.h"
 #include "xbox_memory_layout.h"
@@ -935,7 +936,20 @@ void xbox_gil_resume(int depth)
 }
 
 /* Separate the two callers without counting preemption again as spin. */
-static void gil_yield_measured(int wait_metric, int total_metric)
+#if defined(__ANDROID__) || defined(NFSU_GIL_HANDOFF_TEST) || defined(NFSU_GUEST_SCHEDULER_TEST)
+static RecompSpinWaitHook s_spin_wait_hook;
+#endif
+
+void xbox_set_spin_wait_hook(RecompSpinWaitHook hook)
+{
+#if defined(__ANDROID__) || defined(NFSU_GIL_HANDOFF_TEST) || defined(NFSU_GUEST_SCHEDULER_TEST)
+    __atomic_store_n(&s_spin_wait_hook, hook, __ATOMIC_RELEASE);
+#else
+    (void)hook;
+#endif
+}
+
+static void gil_yield_measured_poll(int wait_metric, int total_metric, const RecompSpinWait *poll)
 {
 #ifdef NFSU_GUEST_EXECUTOR
     if (bridge_on_executor()) {
@@ -945,8 +959,13 @@ static void gil_yield_measured(int wait_metric, int total_metric)
         return;
     }
 #endif
+    RecompSpinWaitHook hook = NULL;
+#if defined(__ANDROID__) || defined(NFSU_GIL_HANDOFF_TEST) || defined(NFSU_GUEST_SCHEDULER_TEST)
+    hook = __atomic_load_n(&s_spin_wait_hook, __ATOMIC_ACQUIRE);
+#endif
+    int native_poll = poll && hook && !xbox_thread_holds_dispatch() && hook(poll, 0);
 #if defined(__ANDROID__) || defined(NFSU_GUEST_SCHEDULER_TEST)
-    if (s_guest_scheduler_on && t_gil_depth > 0) {
+    if (s_guest_scheduler_on && t_gil_depth > 0 && !native_poll) {
         uint64_t start = nfsu_perf_begin();
         XgsAcquire acquired = xgs_yield_reason(wait_metric == NFSU_PERF_SPIN_WAIT);
         if (acquired.switched && start) {
@@ -968,7 +987,7 @@ static void gil_yield_measured(int wait_metric, int total_metric)
     /* suspend may report/reset this thread's PERF5 window. Snapshot after it. */
     uint64_t start = d > 0 ? nfsu_perf_begin() : 0;
     uint64_t wait_before = nfsu_perf_gil_wait_sum();
-    SwitchToThread();
+    if (!native_poll || !hook(poll, 1)) SwitchToThread();
     xbox_gil_resume(d);
     if (start) {
         uint64_t wait_after = nfsu_perf_gil_wait_sum();
@@ -976,6 +995,17 @@ static void gil_yield_measured(int wait_metric, int total_metric)
             nfsu_perf_add(wait_metric, wait_after - wait_before);
         nfsu_perf_end(total_metric, start);
     }
+}
+
+static void gil_yield_measured(int wait_metric, int total_metric)
+{
+    gil_yield_measured_poll(wait_metric, total_metric, NULL);
+}
+
+void recomp_spin_yield_at(uint32_t pc, uint32_t ax, uint32_t cx, uint32_t dx, uint32_t si)
+{
+    RecompSpinWait poll = {pc, ax, cx, dx, si};
+    gil_yield_measured_poll(NFSU_PERF_SPIN_WAIT, NFSU_PERF_SPIN_TOTAL, &poll);
 }
 
 /* RECOMP_SPIN_HINT's periodic yield: a poll loop waits for another thread,
