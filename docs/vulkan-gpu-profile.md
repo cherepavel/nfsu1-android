@@ -72,3 +72,19 @@ commands) and `indices_per_frame` (index count multiplied by instance count).
 These count recorded work rather than raw guest draw requests; pending
 instancing is counted when flushed. Only the first 64 guest passes are covered,
 matching the per-pass timestamp limit.
+
+## One-frame pass sequence
+
+With GPU profiling enabled, Android accepts a live request token in
+`debug.nfsu.trace_target`. At the next 300-flip boundary, `[PASSSEQ]` logs the
+guest passes in recording order: target address, dimensions, clear count,
+indexed-draw count, indices and the host function that ended the pass.
+The final output pass remains covered by `present_ms`.
+
+For example, set the property to `video` before startup, allow the opening
+movie to play, then change it to `menu` after entering the target menu. Each
+new nonzero token captures once per process; `0` disables requests. No restart
+is required to change the token. Logging can perturb the captured frame, so
+exclude its timing window. A clear-only pass is evidence of recorded work,
+not proof that the clear can be removed: later reads and shared depth/stencil
+state still require dependency analysis.

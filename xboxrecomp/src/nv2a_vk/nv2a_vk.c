@@ -232,7 +232,11 @@ typedef struct {
     uint32_t gpu_passes, gpu_barriers, gpu_blits;
     uint32_t gpu_pass_count;
     int gpu_active_pass;
-    struct { uint32_t target, width, height; uint64_t draws, indices; } gpu_targets[GPU_PASS_LIMIT];
+    struct {
+        uint32_t target, width, height, clears;
+        uint64_t draws, indices;
+        const char *end_reason;
+    } gpu_targets[GPU_PASS_LIMIT];
     Garbage        *garbage;
     uint32_t        ngarbage, garbage_cap;
 #ifdef __ANDROID__
@@ -440,12 +444,16 @@ typedef struct {
     uint32_t aa_sx, aa_sy;
     int dirty;                 /* written since the last barrier */
     uint32_t gen;              /* bumped by every draw and clear into it */
+    int clear_pending;
+    VkClearColorValue clear_value;
 } VkSurf;
 
 typedef struct {
     uint32_t va, pw, ph;
     VkImage image; VkImageView view; VkDeviceMemory mem;
     uint32_t used;
+    int clear_pending;
+    VkClearDepthStencilValue clear_value;
 } VkDepthBuf;
 
 #define VK_MAX_SURF 32
@@ -518,11 +526,12 @@ static void barrier_all(void)
         s_surf[i].dirty = 0;
 }
 
-static void end_rendering(void)
+static void end_rendering_at(const char *reason)
 {
     if (s_in_render) {
         p_end_rendering(s_cb);
         if (s_f->gpu_queries && s_f->gpu_active_pass >= 0) {
+            s_f->gpu_targets[s_f->gpu_active_pass].end_reason = reason;
             vkCmdWriteTimestamp(s_cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
                 s_f->gpu_queries, 4 + (uint32_t)s_f->gpu_active_pass * 2);
             s_f->gpu_active_pass = -1;
@@ -530,6 +539,7 @@ static void end_rendering(void)
         s_in_render = 0;
     }
 }
+#define end_rendering() end_rendering_at(__func__)
 
 static VkRect2D s_sc_cur;               /* scissor set in this pass */
 
@@ -567,56 +577,7 @@ static void set_surface_scissor(const uint32_t *r, const VkSurf *s)
     }
 }
 
-static void begin_rendering(VkSurf *s, VkDepthBuf *d)
-{
-    VkRenderingAttachmentInfo ca = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
-    VkRenderingAttachmentInfo da = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
-    VkRenderingInfo ri = { VK_STRUCTURE_TYPE_RENDERING_INFO };
-
-    if (s_in_render && s_rt == s && s_rt_depth == d)
-        return;
-    end_rendering();
-    barrier_all();
-    ca.imageView = s->view;
-    ca.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    ca.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-    ca.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    ri.renderArea.extent.width = s->pw;
-    ri.renderArea.extent.height = s->ph;
-    if (d) {
-        if (d->pw < ri.renderArea.extent.width) ri.renderArea.extent.width = d->pw;
-        if (d->ph < ri.renderArea.extent.height) ri.renderArea.extent.height = d->ph;
-    }
-    ri.layerCount = 1;
-    ri.colorAttachmentCount = 1;
-    ri.pColorAttachments = &ca;
-    if (d) {
-        da.imageView = d->view;
-        da.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-        da.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-        da.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        ri.pDepthAttachment = &da;
-        ri.pStencilAttachment = &da;
-    }
-    if (s_f->gpu_queries) {
-        s_f->gpu_passes++;
-        if (s_f->gpu_pass_count < GPU_PASS_LIMIT) {
-            uint32_t slot = s_f->gpu_pass_count++;
-            s_f->gpu_targets[slot].draws = s_f->gpu_targets[slot].indices = 0;
-            s_f->gpu_targets[slot].target = s->va;
-            s_f->gpu_targets[slot].width = ri.renderArea.extent.width;
-            s_f->gpu_targets[slot].height = ri.renderArea.extent.height;
-            s_f->gpu_active_pass = (int)slot;
-            vkCmdWriteTimestamp(s_cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                s_f->gpu_queries, 3 + slot * 2);
-        }
-    }
-    p_begin_rendering(s_cb, &ri);
-    s_in_render = 1;
-    s_rt = s;
-    s_rt_depth = d;
-    set_viewport(s->pw, s->ph);
-}
+#include "nv2a_vk_render_pass.h"
 
 /* An image in GENERAL layout, from UNDEFINED; recorded outside rendering. */
 static void image_to_general(VkImage img, VkImageAspectFlags aspect)
@@ -806,6 +767,7 @@ static void rescale_surfaces(double k)
         uint32_t pw, ph;
         if (!s->image)
             continue;
+        color_ready(s);
         stored_size(s->w, s->h, s->aa_sx, &pw, &ph);
         if (pw == s->pw && ph == s->ph)
             continue;
@@ -1469,6 +1431,7 @@ static VkImageView cube_from_surfaces(uint32_t va, uint32_t w, uint32_t h, uint3
         VkImageBlit bl;
         if (!sf || (c->src[f] == sf && c->gen[f] == sf->gen))
             continue;
+        color_ready(sf);
         if (!copied) {
             end_rendering();
             barrier_all();
@@ -1642,6 +1605,7 @@ static void bind_stage(const uint32_t *regs, int i, float scale[2], VkDescriptor
             }
         }
     } else if (rt) {
+        color_ready(rt);
         out->imageView = rt->view;
         *sampled = rt;
         rt_scale(w, h, rt->w, rt->h, rt->aa_sx, rt->aa_sy, scale);
@@ -2291,7 +2255,7 @@ static VkPipeline pipe_get(const PipeKey *k)
     ds.front.compareOp = cmp_op(k->state[10], 0x207);
     ds.back = ds.front;
     dy.dynamicStateCount = 6;
-    ci.renderPass = android_render_pass(cfmt, k->depth, 0);
+    ci.renderPass = android_render_pass(cfmt, k->depth, 0, 0);
 #else
     ci.pNext = &rci;
 #endif
@@ -4018,10 +3982,17 @@ static void vk_clear(const Nv2aSurface *sf, const Nv2aRenderState *rs,
     }
     if (!nca)
         return;
+    if (lazy_clears_enabled() && defer_full_clear(s, d, &rect, nca, ca)) {
+        s->dirty = 1;
+        s->gen++;
+        return;
+    }
     VT("clear %08X %ux%u flags %X rect %d,%d %ux%u depth %p\n", s->va, s->pw, s->ph, flags,
        rect.rect.offset.x, rect.rect.offset.y, rect.rect.extent.width, rect.rect.extent.height, (void *)d);
     begin_rendering(s, d);
     vkCmdClearAttachments(s_cb, nca, ca, 1, &rect);
+    if (s_f->gpu_queries && s_f->gpu_active_pass >= 0)
+        s_f->gpu_targets[s_f->gpu_active_pass].clears++;
     VT("  cleared\n");
     s->dirty = 1;
     s->gen++;
@@ -4059,6 +4030,7 @@ static void dump_surface(VkSurf *s, const char *path)
     VkBufferImageCopy rg;
     void *ptr;
 
+    color_ready(s);
     bci.size = (VkDeviceSize)s->pw * s->ph * 4;
     bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     if (vkCreateBuffer(s_dev, &bci, NULL, &buf) != VK_SUCCESS)
@@ -4253,7 +4225,7 @@ static VkPipeline pp_pipe(VkFormat fmt)
         rci.colorAttachmentCount = 1;
         rci.pColorAttachmentFormats = &fmt;
 #ifdef __ANDROID__
-        ci.renderPass = android_render_pass(fmt, 0, 1);
+        ci.renderPass = android_render_pass(fmt, 0, 1, 1);
 #else
         ci.pNext = &rci;
 #endif
@@ -4304,6 +4276,7 @@ static int present_fxaa(VkSurf *s, VkImage dst, VkImageView dview, VkFormat fmt,
 
     if (!pipe || !dview)
         return 0;
+    color_ready(s);
     end_rendering();
     b.srcAccessMask = 0;
     b.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
@@ -4492,6 +4465,31 @@ static void vk_flip_impl(void)
     end_rendering();
     s_rt = NULL;
     s_rt_depth = NULL;
+#ifdef __ANDROID__
+    /* One completed guest command sequence per nonzero request token.
+     * This frame's logging is excluded from benchmarks. */
+    {
+        static char traced_request[PROP_VALUE_MAX];
+        if (s_frame % 300 == 0) {
+            char property[PROP_VALUE_MAX] = {0};
+            __system_property_get("debug.nfsu.trace_target", property);
+            if (*property && strcmp(property, "0") && strcmp(property, traced_request)) {
+                snprintf(traced_request, sizeof traced_request, "%s", property);
+                NFS_LOG_INFO("graphics", "[PASSSEQ] request=%s frame=%u passes=%u timestamps=%d\n",
+                    property, s_frame, s_f->gpu_pass_count, s_f->gpu_queries != VK_NULL_HANDLE);
+                for (uint32_t i = 0; i < s_f->gpu_pass_count; i++)
+                    NFS_LOG_INFO("graphics", "[PASSSEQ] frame=%u pass=%u target=%08X size=%ux%u"
+                        " clears=%u draws=%llu indices=%llu end=%s\n",
+                        s_frame, i, s_f->gpu_targets[i].target,
+                        s_f->gpu_targets[i].width, s_f->gpu_targets[i].height,
+                        s_f->gpu_targets[i].clears,
+                        (unsigned long long)s_f->gpu_targets[i].draws,
+                        (unsigned long long)s_f->gpu_targets[i].indices,
+                        s_f->gpu_targets[i].end_reason ? s_f->gpu_targets[i].end_reason : "unknown");
+            }
+        }
+    }
+#endif
     {
         int pct = nv2a_vk_scale_pct;
         double k = pct < 50 ? 0.0 : pct > 400 ? 4.0 : pct / 100.0;
@@ -4540,6 +4538,7 @@ static void vk_flip_impl(void)
             dump_fxaa(s, path);
         }
     }
+    color_ready(s);
     barrier_all();
 
     if (s_f->gpu_queries)

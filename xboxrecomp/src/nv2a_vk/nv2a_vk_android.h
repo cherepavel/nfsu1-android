@@ -1,7 +1,7 @@
 /* Vulkan 1.1 path for Android drivers without dynamic rendering, push
  * descriptors or extended dynamic state. Included after Frame/s_cb. */
 #include "nv2a_vk_framebuffer_cache.h"
-static struct { VkFormat format; int depth, clear; VkRenderPass pass; } s_android_passes[8];
+static struct { VkFormat format; int depth, present, clears; VkRenderPass pass; } s_android_passes[32];
 
 /* Live A/B control; one property read per 300 flips, never per draw. */
 static int android_framebuffer_cache_enabled(void)
@@ -22,28 +22,30 @@ static int android_framebuffer_cache_enabled(void)
     return enabled;
 }
 
-static VkRenderPass android_render_pass(VkFormat format, int depth, int clear)
+static VkRenderPass android_render_pass(VkFormat format, int depth, int present, int clears)
 {
     unsigned i;
-    for (i = 0; i < 8; i++) {
+    for (i = 0; i < 32; i++) {
         if (s_android_passes[i].pass && s_android_passes[i].format == format
-            && s_android_passes[i].depth == depth && s_android_passes[i].clear == clear)
+            && s_android_passes[i].depth == depth && s_android_passes[i].present == present
+            && s_android_passes[i].clears == clears)
             return s_android_passes[i].pass;
         if (!s_android_passes[i].pass) break;
     }
-    if (i == 8) { NFS_LOG_FATAL("graphics", "  [VK] " "render pass cache full\n"); abort(); }
+    if (i == 32) { NFS_LOG_FATAL("graphics", "  [VK] " "render pass cache full\n"); abort(); }
     VkAttachmentDescription attachments[2] = {0};
     attachments[0].format = format;
     attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
-    attachments[0].loadOp = clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+    attachments[0].loadOp = (clears & 1) ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
     attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    attachments[0].initialLayout = attachments[0].finalLayout = clear
+    attachments[0].initialLayout = attachments[0].finalLayout = present
         ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL;
     attachments[1].format = s_depth_fmt;
     attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
-    attachments[1].loadOp = attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    attachments[1].loadOp = attachments[1].stencilLoadOp = (clears & 2)
+        ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
     attachments[1].storeOp = attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
     attachments[1].initialLayout = attachments[1].finalLayout = VK_IMAGE_LAYOUT_GENERAL;
     VkAttachmentReference color = {0, attachments[0].finalLayout};
@@ -64,7 +66,8 @@ static VkRenderPass android_render_pass(VkFormat format, int depth, int clear)
     }
     s_android_passes[i].format = format;
     s_android_passes[i].depth = depth;
-    s_android_passes[i].clear = clear;
+    s_android_passes[i].present = present;
+    s_android_passes[i].clears = clears;
     s_android_passes[i].pass = pass;
     return pass;
 }
@@ -79,9 +82,12 @@ static void android_frame_reset(Frame *frame)
 
 static void VKAPI_PTR android_begin_rendering(VkCommandBuffer command, const VkRenderingInfo *info)
 {
-    int clear = info->pColorAttachments[0].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR;
-    VkRenderPass pass = android_render_pass(clear ? s_sc_format : VK_FORMAT_B8G8R8A8_UNORM,
-        info->pDepthAttachment != NULL, clear);
+    int present = info->pColorAttachments[0].imageLayout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    int clears = info->pColorAttachments[0].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR;
+    if (info->pDepthAttachment && info->pDepthAttachment->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR)
+        clears |= 2;
+    VkRenderPass pass = android_render_pass(present ? s_sc_format : VK_FORMAT_B8G8R8A8_UNORM,
+        info->pDepthAttachment != NULL, present, clears);
     VkImageView views[2] = {info->pColorAttachments[0].imageView, VK_NULL_HANDLE};
     if (info->pDepthAttachment) views[1] = info->pDepthAttachment->imageView;
     VkFramebufferCreateInfo create = {VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
@@ -96,11 +102,12 @@ static void VKAPI_PTR android_begin_rendering(VkCommandBuffer command, const VkR
         NFS_LOG_FATAL("graphics", "  [VK] " "framebuffer creation failed\n"); abort();
     }
     VkClearValue values[2] = {info->pColorAttachments[0].clearValue, {0}};
+    if (info->pDepthAttachment) values[1] = info->pDepthAttachment->clearValue;
     VkRenderPassBeginInfo begin = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     begin.renderPass = pass;
     begin.framebuffer = framebuffer;
     begin.renderArea = info->renderArea;
-    begin.clearValueCount = clear ? 1 : 0;
+    begin.clearValueCount = (clears & 2) ? 2 : clears ? 1 : 0;
     begin.pClearValues = values;
     vkCmdBeginRenderPass(command, &begin, VK_SUBPASS_CONTENTS_INLINE);
 }
