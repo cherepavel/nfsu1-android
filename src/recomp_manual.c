@@ -32,6 +32,15 @@
 #define RECOMP_GENERATED_CODE
 #include "recomp_funcs.h"
 
+/* Software movie decoder's table-based YUV -> 32-bit RGB row conversion. */
+extern void sub_0019D840_gen(void);
+extern int nfsu_movie_yuv_native(void);
+void sub_0019D840(void)
+{
+    RECOMP_PREEMPT();
+    if (!nfsu_movie_yuv_native()) sub_0019D840_gen();
+}
+
 #ifdef __ANDROID__
 #include <pthread.h>
 #include <time.h>

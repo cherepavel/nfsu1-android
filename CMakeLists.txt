@@ -73,6 +73,7 @@ file(GLOB RECOMP_GEN_SOURCES CONFIGURE_DEPENDS "${NFSU2_GEN_DIR}/*.c")
 set(GAME_SOURCES
     src/main.c
     src/recomp_manual.c
+    src/movie_yuv.c
     src/switch_nx.c
 )
 
@@ -154,6 +155,7 @@ else()
     endif()
     set_source_files_properties(${RECOMP_GEN_SOURCES} PROPERTIES
         COMPILE_OPTIONS "${NFSU2_GEN_FLAGS}")
+    set_source_files_properties(src/movie_yuv.c PROPERTIES COMPILE_OPTIONS "-O2")
     target_link_libraries(${PROJECT_NAME} PRIVATE m)
 endif()
 
