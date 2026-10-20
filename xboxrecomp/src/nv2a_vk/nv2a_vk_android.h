@@ -1,6 +1,26 @@
 /* Vulkan 1.1 path for Android drivers without dynamic rendering, push
  * descriptors or extended dynamic state. Included after Frame/s_cb. */
+#include "nv2a_vk_framebuffer_cache.h"
 static struct { VkFormat format; int depth, clear; VkRenderPass pass; } s_android_passes[8];
+
+/* Live A/B control; one property read per 300 flips, never per draw. */
+static int android_framebuffer_cache_enabled(void)
+{
+    static int enabled = -1;
+    static uint32_t checked;
+    if (enabled < 0 || s_frame - checked >= 300) {
+        char property[PROP_VALUE_MAX] = {0};
+        __system_property_get("debug.nfsu.framebuffer_cache", property);
+        int next = strcmp(property, "0") != 0;
+        NFS_LOG_INFO("performance", "[VKFB] cache=%d next_cache=%d hits=%u creates=%u (since last report)\n",
+            enabled < 0 ? next : enabled, next,
+            s_android_framebuffer_hits, s_android_framebuffer_creates);
+        enabled = next;
+        checked = s_frame;
+        s_android_framebuffer_hits = s_android_framebuffer_creates = 0;
+    }
+    return enabled;
+}
 
 static VkRenderPass android_render_pass(VkFormat format, int depth, int clear)
 {
@@ -71,18 +91,10 @@ static void VKAPI_PTR android_begin_rendering(VkCommandBuffer command, const VkR
     create.width = info->renderArea.extent.width;
     create.height = info->renderArea.extent.height;
     create.layers = 1;
-    VkFramebuffer framebuffer;
-    if (vkCreateFramebuffer(s_dev, &create, NULL, &framebuffer) != VK_SUCCESS) {
+    VkFramebuffer framebuffer = android_framebuffer_get(&create, android_framebuffer_cache_enabled());
+    if (!framebuffer) {
         NFS_LOG_FATAL("graphics", "  [VK] " "framebuffer creation failed\n"); abort();
     }
-    if (s_f->nframebuffers == s_f->framebuffer_cap) {
-        uint32_t cap = s_f->framebuffer_cap ? s_f->framebuffer_cap * 2 : 64;
-        VkFramebuffer *next = realloc(s_f->framebuffers, cap * sizeof(*next));
-        if (!next) abort();
-        s_f->framebuffers = next;
-        s_f->framebuffer_cap = cap;
-    }
-    s_f->framebuffers[s_f->nframebuffers++] = framebuffer;
     VkClearValue values[2] = {info->pColorAttachments[0].clearValue, {0}};
     VkRenderPassBeginInfo begin = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     begin.renderPass = pass;

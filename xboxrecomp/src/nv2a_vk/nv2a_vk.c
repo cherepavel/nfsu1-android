@@ -259,6 +259,9 @@ static void garbage_add_pipe(VkPipeline pipe);
 static void garbage_add(VkImage img, VkImageView view, VkDeviceMemory mem)
 {
     Frame *f = s_f;
+#ifdef __ANDROID__
+    android_framebuffer_retire_view(view, f);
+#endif
     if (f->ngarbage == f->garbage_cap) {
         f->garbage_cap = f->garbage_cap ? f->garbage_cap * 2 : 64;
         f->garbage = (Garbage *)realloc(f->garbage, f->garbage_cap * sizeof *f->garbage);
@@ -2500,6 +2503,9 @@ static int create_swapchain(void)
             return 0;
         }
         for (i = 0; i < 8; i++) {
+#ifdef __ANDROID__
+            android_framebuffer_retire_view(s_sc_views[i], NULL);
+#endif
             if (s_sc_views[i]) vkDestroyImageView(s_dev, s_sc_views[i], NULL);
             s_sc_views[i] = VK_NULL_HANDLE;
 #ifdef __ANDROID__
@@ -2564,6 +2570,7 @@ static void android_release_presentation(void)
     uint32_t i;
     android_presentation_idle();
     for (i = 0; i < 8; i++) {
+        android_framebuffer_retire_view(s_sc_views[i], NULL);
         if (s_sc_views[i]) vkDestroyImageView(s_dev, s_sc_views[i], NULL);
         s_sc_views[i] = VK_NULL_HANDLE;
         if (s_sc_rendered[i]) vkDestroySemaphore(s_dev, s_sc_rendered[i], NULL);
