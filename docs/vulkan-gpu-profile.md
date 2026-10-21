@@ -32,11 +32,31 @@ Restore the default with `adb shell setprop debug.nfsu.gpu_profile 0` and a
 process restart. No render policy or graphics settings are changed by this
 instrumentation.
 
-`[GPUPASS]` lists the five guest render targets with the largest aggregate
-pass interval per completed frame, with stored dimensions and pass count.
+`debug.nfsu.gpu_profile=2` selects a coarse startup mode with only the three
+frame timestamps and no per-pass queries/GPUPASS table. This avoids the detailed
+pass timestamps when testing vertex/fragment overlap. GPU5 still counts passes,
+blits and barriers, with `pass_barriers` distinguishing the opt-in scoped pass
+barriers from `full_barriers`; sum both for total barrier count. `guest_draws`
+and `guest_indices` count all actual indexed guest commands (including held
+instances) in either mode, excluding the final FXAA triangle. See the
+[pass-barrier experiment](vulkan-pass-barrier.md) for the dependency audit and
+controlled comparison protocol. Mode 0/1 retains its previous meaning.
+
+GPU5 additionally records depth attachment passes and nominal load/store
+render-area megapixels (`depth_passes`, `depth_load_mpix`, `depth_store_mpix`).
+These are command-policy counters, not measured memory traffic. GPUPASS and
+PASSSEQ include `depth=0/1`; pass aggregation separates attachment presence.
+See [unused depth/stencil attachments](vulkan-unused-depth.md) for the guards
+and live comparison protocol.
+
+`[GPUPASS]` lists the ten target/dimension/end-reason groups with the largest
+aggregate pass interval per completed frame. The `end` field is the function
+that closed each rendering instance. It separates, for example, main-target
+geometry ending at reflection assembly from UI ending at presentation; the
+name is a recording boundary, not an automatic semantic classification.
 The first 64 guest passes in each frame have paired bottom-of-pipe timestamps
 outside rendering instances; later passes still contribute to `game_ms`.
-The aggregation holds 64 target/dimension combinations; extra combinations
+The aggregation holds 64 target/dimension/end-reason combinations; extra combinations
 are reported as overflow time. Final FXAA is covered by `present_ms` rather
 than the guest target table. Pass intervals exclude the global barrier before
 the pass and work recorded between passes. Timestamp commands can perturb
@@ -88,3 +108,8 @@ is required to change the token. Logging can perturb the captured frame, so
 exclude its timing window. A clear-only pass is evidence of recorded work,
 not proof that the clear can be removed: later reads and shared depth/stencil
 state still require dependency analysis.
+
+The experimental compact shader adds per-pass `compact_eligible_per_frame`
+and `compact_selected_per_frame` draw counters. They follow actual indexed
+commands, including deferred instancing flushes, and add no timestamp queries.
+See [the experiment](vulkan-compact-fragment.md) for eligibility and limitations.

@@ -9,6 +9,7 @@
 #include <assert.h>
 typedef struct {
     uint32_t va, pw, ph;
+    uint32_t screen_seen, screen_frame;
     VkImageView view;
     int clear_pending;
     VkClearColorValue clear_value;
@@ -24,27 +25,31 @@ typedef struct {
 static struct {
     VkQueryPool gpu_queries;
     unsigned gpu_passes, gpu_pass_count;
+    unsigned gpu_depth_passes;
+    uint64_t gpu_depth_load_pixels, gpu_depth_store_pixels;
     int gpu_active_pass;
     struct {
-        uint32_t target, width, height, clears;
-        uint64_t draws, indices;
+        uint32_t target, width, height, clears, depth;
+        uint64_t draws, indices, compact_eligible, compact_selected;
         const char *end_reason;
     } gpu_targets[GPU_PASS_LIMIT];
 } frame, *s_f = &frame;
 static VkCommandBuffer s_cb;
+static int s_gpu_profile = 1;
 static int s_in_render;
 static VkSurf *s_rt;
 static VkDepthBuf *s_rt_depth;
 static unsigned begins, ends, barriers;
 static unsigned depth_transfers;
+static unsigned timestamps;
 static uint32_t last_width, last_height;
+static uint32_t s_frame;
 #ifdef __ANDROID__
 #define PROP_VALUE_MAX 92
-static uint32_t s_frame;
 static const char *property_value = "0";
 static int test_property_get(const char *name, char *value)
 {
-    assert(!strcmp(name, "debug.nfsu.lazy_clear"));
+    assert(!strcmp(name, "debug.nfsu.lazy_clear") || !strcmp(name, "debug.nfsu.unused_depth"));
     strcpy(value, property_value);
     return (int)strlen(value);
 }
@@ -80,7 +85,11 @@ static void p_begin_rendering(VkCommandBuffer command, const VkRenderingInfo *in
 }
 VKAPI_ATTR void VKAPI_CALL vkCmdWriteTimestamp(VkCommandBuffer command,
     VkPipelineStageFlagBits stage, VkQueryPool pool, uint32_t query)
-{ (void)command; (void)stage; (void)pool; (void)query; }
+{
+    (void)command; (void)stage; (void)pool;
+    assert(query < (s_gpu_profile == 1 ? 3 + GPU_PASS_LIMIT * 2 : 3));
+    timestamps++;
+}
 VKAPI_ATTR void VKAPI_CALL vkCmdClearDepthStencilImage(VkCommandBuffer command,
     VkImage image, VkImageLayout layout, const VkClearDepthStencilValue *value,
     uint32_t count, const VkImageSubresourceRange *range)
@@ -119,10 +128,14 @@ int main(void)
     clear[0].clearValue.color.float32[0] = .5f;
     assert(defer_full_clear(&a,&depth,&rect,2,clear)); /* Latest complete clear wins. */
     frame.gpu_queries = (VkQueryPool)(uintptr_t)1;
+    frame.gpu_targets[0].compact_eligible = frame.gpu_targets[0].compact_selected = 99;
     begin_rendering(&a,&depth);
+    assert(!frame.gpu_targets[0].compact_eligible && !frame.gpu_targets[0].compact_selected);
     assert(begins == 1 && color_load == VK_ATTACHMENT_LOAD_OP_CLEAR && depth_load == VK_ATTACHMENT_LOAD_OP_CLEAR);
     assert(color_value.float32[0] == .5f && color_value.float32[3] == 1);
     assert(depth_value.depth == .25f && depth_value.stencil == 19);
+    assert(frame.gpu_depth_passes == 1 && !frame.gpu_depth_load_pixels);
+    assert(frame.gpu_depth_store_pixels == 640u * 480u);
     assert(!a.clear_pending && !depth.clear_pending && frame.gpu_targets[0].clears == 1);
     begin_rendering(&a,&depth);
     assert(begins == 1); /* Ordinary draws keep the existing pass. */
@@ -186,5 +199,16 @@ int main(void)
     begin_rendering(&a,&small_depth);
     assert(begins == before+2 && !a.clear_pending);
     assert(color_load == VK_ATTACHMENT_LOAD_OP_LOAD && last_width == 320 && last_height == 240);
+    end_rendering();
+    /* Coarse profiling must count passes without issuing any pass query into
+     * its three-entry pool; this avoids pass timestamps in the overlap A/B. */
+    s_gpu_profile = 2;
+    frame.gpu_pass_count = 0;
+    before = timestamps;
+    unsigned passes_before = frame.gpu_passes;
+    begin_rendering(&a,&depth);
+    assert(timestamps == before && !frame.gpu_pass_count && frame.gpu_active_pass == -1);
+    assert(frame.gpu_passes == passes_before + 1);
+    end_rendering();
     puts("Deferred clears: full/partial eligibility, load ops, shared depth, overwrite, color-read materialization: PASS");
 }

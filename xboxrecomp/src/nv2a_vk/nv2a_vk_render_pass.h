@@ -52,10 +52,18 @@ static void begin_rendering(VkSurf *s, VkDepthBuf *d)
     }
     if (s_f->gpu_queries) {
         s_f->gpu_passes++;
-        if (s_f->gpu_pass_count < GPU_PASS_LIMIT) {
+        if (d) {
+            uint64_t pixels = (uint64_t)ri.renderArea.extent.width * ri.renderArea.extent.height;
+            s_f->gpu_depth_passes++;
+            if (!d->clear_pending) s_f->gpu_depth_load_pixels += pixels;
+            s_f->gpu_depth_store_pixels += pixels;
+        }
+        if (s_gpu_profile == 1 && s_f->gpu_pass_count < GPU_PASS_LIMIT) {
             uint32_t slot = s_f->gpu_pass_count++;
             s_f->gpu_targets[slot].draws = s_f->gpu_targets[slot].indices = 0;
+            s_f->gpu_targets[slot].compact_eligible = s_f->gpu_targets[slot].compact_selected = 0;
             s_f->gpu_targets[slot].clears = s->clear_pending || (d && d->clear_pending);
+            s_f->gpu_targets[slot].depth = d != NULL;
             s_f->gpu_targets[slot].end_reason = NULL;
             s_f->gpu_targets[slot].target = s->va;
             s_f->gpu_targets[slot].width = ri.renderArea.extent.width;

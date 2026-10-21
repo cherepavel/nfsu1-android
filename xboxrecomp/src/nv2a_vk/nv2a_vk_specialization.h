@@ -1,6 +1,6 @@
 /* Included after the renderer's Android includes and s_frame. These flags
  * are already part of PipeKey; changing them selects distinct cached pipes. */
-typedef struct { int alpha, zero_source; } VkShaderSpecialization;
+typedef struct { int alpha, zero_source, compact; } VkShaderSpecialization;
 static VkShaderSpecialization android_shader_specialization(void)
 {
     static VkShaderSpecialization mode;
@@ -13,9 +13,11 @@ static VkShaderSpecialization android_shader_specialization(void)
         next.alpha = strcmp(value, "0") != 0;
         __system_property_get("debug.nfsu.zero_source", value);
         next.zero_source = strcmp(value, "0") != 0;
-        if (!initialized || next.alpha != mode.alpha || next.zero_source != mode.zero_source)
-            NFS_LOG_INFO("graphics", "[VKSPEC] alpha=%d zero_source=%d frame=%u\n",
-                next.alpha, next.zero_source, s_frame);
+        __system_property_get("debug.nfsu.compact_psh", value);
+        next.compact = strcmp(value, "1") == 0;
+        if (!initialized || next.compact != mode.compact || next.alpha != mode.alpha || next.zero_source != mode.zero_source)
+            NFS_LOG_INFO("graphics", "[VKSPEC] alpha=%d zero_source=%d compact=%d frame=%u\n",
+                next.alpha, next.zero_source, next.compact, s_frame);
         mode = next;
         checked = s_frame;
         initialized = 1;

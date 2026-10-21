@@ -232,12 +232,15 @@ typedef struct {
     VkDeviceSize    ring_off;
     int             submitted;
     VkQueryPool     gpu_queries;
-    uint32_t gpu_passes, gpu_barriers, gpu_blits;
+    uint32_t gpu_passes, gpu_barriers, gpu_pass_barriers, gpu_blits;
+    uint64_t gpu_draws, gpu_indices;
+    uint32_t gpu_depth_passes;
+    uint64_t gpu_depth_load_pixels, gpu_depth_store_pixels;
     uint32_t gpu_pass_count;
     int gpu_active_pass;
     struct {
-        uint32_t target, width, height, clears;
-        uint64_t draws, indices;
+        uint32_t target, width, height, clears, depth;
+        uint64_t draws, indices, compact_eligible, compact_selected;
         const char *end_reason;
     } gpu_targets[GPU_PASS_LIMIT];
     Garbage        *garbage;
@@ -306,8 +309,14 @@ static void gpu_report(Frame *f)
 {
     static uint64_t count, last;
     static double game_sum, present_sum, game_max, present_max;
-    static uint64_t passes, barriers, blits;
-    static struct { uint32_t target, width, height; uint64_t calls, draws, indices; double ms; } targets[GPU_PASS_LIMIT];
+    static uint64_t passes, barriers, pass_barriers, blits, draws, indices;
+    static uint64_t depth_passes, depth_load_pixels, depth_store_pixels;
+    static struct {
+        uint32_t target, width, height, depth;
+        const char *end_reason;
+        uint64_t calls, draws, indices, compact_eligible, compact_selected;
+        double ms;
+    } targets[GPU_PASS_LIMIT];
     static double overflow_ms;
     uint64_t ticks[3];
     if (!f->gpu_queries || vkGetQueryPoolResults(s_dev, f->gpu_queries,
@@ -323,12 +332,20 @@ static void gpu_report(Frame *f)
     count++;
     passes += f->gpu_passes;
     barriers += f->gpu_barriers;
+    pass_barriers += f->gpu_pass_barriers;
     blits += f->gpu_blits;
+    draws += f->gpu_draws;
+    indices += f->gpu_indices;
+    depth_passes += f->gpu_depth_passes;
+    depth_load_pixels += f->gpu_depth_load_pixels;
+    depth_store_pixels += f->gpu_depth_store_pixels;
     uint64_t pass_ticks[GPU_PASS_LIMIT * 2];
     if (f->gpu_pass_count && vkGetQueryPoolResults(s_dev, f->gpu_queries,
             3, f->gpu_pass_count * 2, sizeof pass_ticks, pass_ticks,
             sizeof pass_ticks[0], VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
         for (uint32_t i = 0; i < f->gpu_pass_count; i++) {
+            const char *reason = f->gpu_targets[i].end_reason;
+            if (!reason) reason = "unknown";
             double ms = ((pass_ticks[i * 2 + 1] - pass_ticks[i * 2]) & mask)
                 * (double)s_gpu_period / 1e6;
             uint32_t j;
@@ -337,11 +354,15 @@ static void gpu_report(Frame *f)
                     targets[j].target = f->gpu_targets[i].target;
                     targets[j].width = f->gpu_targets[i].width;
                     targets[j].height = f->gpu_targets[i].height;
+                    targets[j].depth = f->gpu_targets[i].depth;
+                    targets[j].end_reason = reason;
                     break;
                 }
                 if (targets[j].target == f->gpu_targets[i].target
                     && targets[j].width == f->gpu_targets[i].width
-                    && targets[j].height == f->gpu_targets[i].height) break;
+                    && targets[j].height == f->gpu_targets[i].height
+                    && targets[j].depth == f->gpu_targets[i].depth
+                    && !strcmp(targets[j].end_reason, reason)) break;
             }
             if (j == GPU_PASS_LIMIT) overflow_ms += ms;
             else {
@@ -349,32 +370,41 @@ static void gpu_report(Frame *f)
                 targets[j].ms += ms;
                 targets[j].draws += f->gpu_targets[i].draws;
                 targets[j].indices += f->gpu_targets[i].indices;
+                targets[j].compact_eligible += f->gpu_targets[i].compact_eligible;
+                targets[j].compact_selected += f->gpu_targets[i].compact_selected;
             }
         }
     }
     uint64_t now = hz_now();
     if (!last) last = now;
     if (now - last >= 5000000000ull) {
-        NFS_LOG_INFO("performance", "[GPU5] frames=%llu game_ms=%.3f game_max_ms=%.3f present_ms=%.3f present_max_ms=%.3f passes=%.1f full_barriers=%.1f blits=%.1f\n",
+        NFS_LOG_INFO("performance", "[GPU5] frames=%llu game_ms=%.3f game_max_ms=%.3f present_ms=%.3f present_max_ms=%.3f passes=%.1f full_barriers=%.1f blits=%.1f pass_barriers=%.1f guest_draws=%.1f guest_indices=%.0f depth_passes=%.1f depth_load_mpix=%.3f depth_store_mpix=%.3f\n",
             (unsigned long long)count, game_sum / count, game_max,
             present_sum / count, present_max, (double)passes / count,
-            (double)barriers / count, (double)blits / count);
-        for (unsigned rank = 0; rank < 5; rank++) {
+            (double)barriers / count, (double)blits / count, (double)pass_barriers / count,
+            (double)draws / count, (double)indices / count,
+            (double)depth_passes / count, (double)depth_load_pixels / count / 1e6,
+            (double)depth_store_pixels / count / 1e6);
+        for (unsigned rank = 0; rank < 10; rank++) {
             unsigned best = GPU_PASS_LIMIT;
             for (unsigned j = 0; j < GPU_PASS_LIMIT; j++)
                 if (targets[j].calls && (best == GPU_PASS_LIMIT || targets[j].ms > targets[best].ms)) best = j;
             if (best == GPU_PASS_LIMIT) break;
-            NFS_LOG_INFO("performance", "[GPUPASS] rank=%u target=%08X size=%ux%u ms_per_frame=%.3f calls_per_frame=%.1f draws_per_frame=%.1f indices_per_frame=%.0f\n",
+            NFS_LOG_INFO("performance", "[GPUPASS] rank=%u target=%08X size=%ux%u end=%s ms_per_frame=%.3f calls_per_frame=%.1f draws_per_frame=%.1f indices_per_frame=%.0f compact_eligible_per_frame=%.1f compact_selected_per_frame=%.1f depth=%u\n",
                 rank + 1, targets[best].target, targets[best].width, targets[best].height,
+                targets[best].end_reason,
                 targets[best].ms / count, (double)targets[best].calls / count,
-                (double)targets[best].draws / count, (double)targets[best].indices / count);
+                (double)targets[best].draws / count, (double)targets[best].indices / count,
+                (double)targets[best].compact_eligible / count, (double)targets[best].compact_selected / count,
+                targets[best].depth);
             targets[best].calls = 0;
         }
         if (overflow_ms > 0)
             NFS_LOG_INFO("performance", "[GPUPASS] overflow_ms_per_frame=%.3f\n", overflow_ms / count);
         memset(targets, 0, sizeof targets);
         overflow_ms = 0;
-        count = passes = barriers = blits = 0;
+        count = passes = barriers = pass_barriers = blits = draws = indices = 0;
+        depth_passes = depth_load_pixels = depth_store_pixels = 0;
         game_sum = present_sum = game_max = present_max = 0;
         last = now;
     }
@@ -392,7 +422,10 @@ static void frame_begin(void)
         vkResetFences(s_dev, 1, &s_f->fence);
         s_f->submitted = 0;
     }
-    s_f->gpu_passes = s_f->gpu_barriers = s_f->gpu_blits = 0;
+    s_f->gpu_passes = s_f->gpu_barriers = s_f->gpu_pass_barriers = s_f->gpu_blits = 0;
+    s_f->gpu_draws = s_f->gpu_indices = 0;
+    s_f->gpu_depth_passes = 0;
+    s_f->gpu_depth_load_pixels = s_f->gpu_depth_store_pixels = 0;
     s_f->gpu_pass_count = 0;
     s_f->gpu_active_pass = -1;
     garbage_free(s_f);
@@ -404,7 +437,7 @@ static void frame_begin(void)
     s_cb = s_f->cbs[0];
     vkBeginCommandBuffer(s_cb, &bi);
     if (s_f->gpu_queries) {
-        vkCmdResetQueryPool(s_cb, s_f->gpu_queries, 0, GPU_QUERY_COUNT);
+        vkCmdResetQueryPool(s_cb, s_f->gpu_queries, 0, s_gpu_profile == 1 ? GPU_QUERY_COUNT : 3);
         vkCmdWriteTimestamp(s_cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, s_f->gpu_queries, 0);
     }
     s_cb_gen++;
@@ -1647,7 +1680,8 @@ static VkPipelineCache       s_pcache;
 typedef struct {
     uint64_t   vkey;
     Nv2aPshKey pkey;
-    VkShaderModule vs, fs;
+    VkShaderModule vs, fs, fs_compact;
+    int compact_attempted;
     uint32_t   used;
     uint32_t   hash;
     int        next;
@@ -2002,6 +2036,7 @@ static VkProg *prog_get(const Nv2aRawBatch *b, const Nv2aPshKey *pk)
         pipes_forget_prog((int)(p - s_prog));
         vkDestroyShaderModule(s_dev, p->vs, NULL);
         vkDestroyShaderModule(s_dev, p->fs, NULL);
+        if (p->fs_compact) vkDestroyShaderModule(s_dev, p->fs_compact, NULL);
         s_prog_live--;
     }
     memset(p, 0, sizeof *p);
@@ -2045,7 +2080,7 @@ typedef struct {
     int      prog;
     uint32_t blend, bsrc, bdst, beq, cmask, depth, topo;
 #ifdef __ANDROID__
-    uint32_t alpha_test, zero_source; /* fragment specialization constants, VkBool32 */
+    uint32_t alpha_test, zero_source, compact; /* fragment specialization constants, VkBool32 */
     uint32_t state[11], strides[16], formats[16];
 #endif
 } PipeKey;
@@ -2201,6 +2236,19 @@ static VkPipeline pipe_get(const PipeKey *k)
     st[0].pName = "main";
     st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
     st[1].module = p->fs;
+#ifdef __ANDROID__
+    if (k->compact) {
+        if (!p->compact_attempted) {
+            char source[4096];
+            p->compact_attempted = 1;
+            int bytes = nv2a_gl_psh_compact(&p->pkey, source, sizeof source);
+            if (bytes >= 0) p->fs_compact = compile(GLSLANG_STAGE_FRAGMENT, source);
+            NFS_LOG_INFO("graphics", "[VKCOMPACT] prog=%d bytes=%d compiled=%d\n",
+                k->prog, bytes, p->fs_compact != VK_NULL_HANDLE);
+        }
+        if (p->fs_compact) st[1].module = p->fs_compact;
+    }
+#endif
     st[1].pName = "main";
 #ifdef __ANDROID__
     VkBool32 specialization_values[2] = {k->alpha_test, k->zero_source};
@@ -2806,9 +2854,14 @@ static int ready(void)
             profile = property;
 #endif
         s_gpu_bits = qf[s_qfam].timestampValidBits;
-        s_gpu_profile = profile && strcmp(profile, "1") == 0 && s_gpu_bits && s_gpu_period > 0;
-        NFS_LOG_INFO("graphics", "[GPU] timestamps=%d valid_bits=%u period_ns=%g\n",
-            s_gpu_profile, s_gpu_bits, (double)s_gpu_period);
+        s_gpu_profile = 0;
+        if (profile && s_gpu_bits && s_gpu_period > 0) {
+            if (!strcmp(profile, "1")) s_gpu_profile = 1;
+            if (!strcmp(profile, "2")) s_gpu_profile = 2;
+        }
+        NFS_LOG_INFO("graphics", "[GPU] timestamps=%d valid_bits=%u period_ns=%g mode=%d pass_timestamps=%d\n",
+            s_gpu_profile != 0, s_gpu_bits, (double)s_gpu_period,
+            s_gpu_profile, s_gpu_profile == 1);
     }
     qci.queueFamilyIndex = s_qfam;
     qci.queueCount = 1;
@@ -2926,7 +2979,7 @@ static int ready(void)
         if (s_gpu_profile) {
             VkQueryPoolCreateInfo qi = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
             qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
-            qi.queryCount = GPU_QUERY_COUNT;
+            qi.queryCount = s_gpu_profile == 1 ? GPU_QUERY_COUNT : 3;
             if (vkCreateQueryPool(s_dev, &qi, NULL, &f->gpu_queries) != VK_SUCCESS) {
                 f->gpu_queries = VK_NULL_HANDLE;
                 NFS_LOG_WARN("graphics", "[GPU] timestamp pool unavailable\n");
@@ -3478,6 +3531,7 @@ static int regs_changed(const uint32_t *r)
 static struct {
     int          on;                        /* a draw is held */
     uint32_t     n, count, max;             /* index count, instances so far, room */
+    int          compact_eligible, compact_selected;
     VkDeviceSize cat;                       /* first instance's constants */
     uint32_t     cb_gen;
     uint32_t     prim, vertex_count, index_count;
@@ -3493,11 +3547,16 @@ static struct {
 static int s_inst_on = -1, s_inst_alt;
 static uint32_t s_st_draws, s_st_calls, s_st_inst, s_st_creuse;
 
-static void gpu_count_draw(uint32_t indices, uint32_t instances)
+static void gpu_count_draw(uint32_t indices, uint32_t instances, int eligible, int selected)
 {
-    if (!s_f->gpu_queries || s_f->gpu_active_pass < 0) return;
+    if (!s_f->gpu_queries) return;
+    s_f->gpu_draws++;
+    s_f->gpu_indices += (uint64_t)indices * instances;
+    if (s_f->gpu_active_pass < 0) return;
     unsigned slot = (unsigned)s_f->gpu_active_pass;
     s_f->gpu_targets[slot].draws++;
+    s_f->gpu_targets[slot].compact_eligible += eligible;
+    s_f->gpu_targets[slot].compact_selected += selected;
     s_f->gpu_targets[slot].indices += (uint64_t)indices * instances;
 }
 
@@ -3508,7 +3567,7 @@ static void pend_flush(void)
     s_pend.on = 0;
     if (s_pend.cb_gen != s_cb_gen)
         return;                                 /* cannot happen: flushes go first */
-    gpu_count_draw(s_pend.n, s_pend.count);
+    gpu_count_draw(s_pend.n, s_pend.count, s_pend.compact_eligible, s_pend.compact_selected);
     vkCmdDrawIndexed(s_cb, s_pend.n, s_pend.count, 0, 0, 0);
     s_st_calls++;
 }
@@ -3547,10 +3606,13 @@ static int pend_eligible(const Nv2aRawBatch *b)
     return 1;
 }
 
-static void pend_hold(const Nv2aRawBatch *b, uint32_t n, VkDeviceSize cat, uint32_t max)
+static void pend_hold(const Nv2aRawBatch *b, uint32_t n, VkDeviceSize cat, uint32_t max,
+                      int compact_eligible, int compact_selected)
 {
     uint32_t a;
     s_pend.on = 1;
+    s_pend.compact_eligible = compact_eligible;
+    s_pend.compact_selected = compact_selected;
     s_pend.n = n;
     s_pend.count = 1;
     s_pend.max = max;
@@ -3584,7 +3646,7 @@ static void pend_hold(const Nv2aRawBatch *b, uint32_t n, VkDeviceSize cat, uint3
         if (!s_pend.idx) {
             s_pend.idx_cap = 0;
             s_pend.on = 0;
-            gpu_count_draw(n, 1);
+            gpu_count_draw(n, 1, compact_eligible, compact_selected);
             vkCmdDrawIndexed(s_cb, n, 1, 0, 0, 0);
             s_st_calls++;
             return;
@@ -3633,6 +3695,7 @@ static void vk_draw_raw_impl(const Nv2aRawBatch *b)
     VkDescriptorBufferInfo ub[3];
     VkWriteDescriptorSet wr[7];
     uint32_t inst_room = 0;
+    int compact_eligible = 0, compact_selected = 0;
     void *map;
     static VkPipeline cur_pipe;
     static uint32_t cur_pipe_gen;
@@ -3744,6 +3807,8 @@ static void vk_draw_raw_impl(const Nv2aRawBatch *b)
     key.topo = topo;
     {
         VkShaderSpecialization mode = android_shader_specialization();
+        compact_eligible = nv2a_gl_psh_compact_eligible(&p->pkey);
+        key.compact = mode.compact && compact_eligible;
         key.zero_source = mode.zero_source && zero_source_safe(r[0x304/4], r[0x344/4],
             r[0x348/4], r[0x350/4], r[0x300/4], r[0x33C/4], p->pkey.shader_program);
         /* Preserve the existing uniform test unless this draw unconditionally
@@ -3757,6 +3822,7 @@ static void vk_draw_raw_impl(const Nv2aRawBatch *b)
     }
     pipe = pipe_get(&key);
     if (!pipe) return;
+    compact_selected = key.compact && p->fs_compact != VK_NULL_HANDLE;
 #endif
     begin_rendering(s, d);
     s->dirty = 1;
@@ -3894,9 +3960,9 @@ static void vk_draw_raw_impl(const Nv2aRawBatch *b)
     /* The constants were the ring's last allocation, so a repeat's set
      * lands right behind them (pend_append). */
     if (pend_eligible(b) && inst_room > 1) {
-        pend_hold(b, n, ub[2].offset, inst_room);
+        pend_hold(b, n, ub[2].offset, inst_room, compact_eligible, compact_selected);
     } else {
-        gpu_count_draw(n, 1);
+        gpu_count_draw(n, 1, compact_eligible, compact_selected);
         vkCmdDrawIndexed(s_cb, n, 1, 0, 0, 0);
         s_st_calls++;
     }
@@ -4467,13 +4533,14 @@ static void vk_flip_impl(void)
                     property, s_frame, s_f->gpu_pass_count, s_f->gpu_queries != VK_NULL_HANDLE);
                 for (uint32_t i = 0; i < s_f->gpu_pass_count; i++)
                     NFS_LOG_INFO("graphics", "[PASSSEQ] frame=%u pass=%u target=%08X size=%ux%u"
-                        " clears=%u draws=%llu indices=%llu end=%s\n",
+                        " clears=%u draws=%llu indices=%llu end=%s depth=%u\n",
                         s_frame, i, s_f->gpu_targets[i].target,
                         s_f->gpu_targets[i].width, s_f->gpu_targets[i].height,
                         s_f->gpu_targets[i].clears,
                         (unsigned long long)s_f->gpu_targets[i].draws,
                         (unsigned long long)s_f->gpu_targets[i].indices,
-                        s_f->gpu_targets[i].end_reason ? s_f->gpu_targets[i].end_reason : "unknown");
+                        s_f->gpu_targets[i].end_reason ? s_f->gpu_targets[i].end_reason : "unknown",
+                        s_f->gpu_targets[i].depth);
             }
         }
     }
