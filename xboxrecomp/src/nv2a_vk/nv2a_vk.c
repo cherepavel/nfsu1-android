@@ -169,6 +169,12 @@ static AndroidHostWindow s_android_window;
 #endif
 static VkFormat       s_sc_format;
 static VkExtent2D     s_sc_extent;
+static VkExtent2D     s_sc_logical_extent;
+static uint32_t       s_sc_rotation;
+#include "nv2a_vk_prerotation.h"
+#ifdef __ANDROID__
+static int s_android_prerotate = -1, s_android_prerotate_failed;
+#endif
 static uint32_t       s_sc_count;
 static VkImage        s_sc_images[8];
 static VkImageView    s_sc_views[8];
@@ -2492,18 +2498,30 @@ static int create_swapchain(void)
     if (caps.maxImageCount && ci.minImageCount > caps.maxImageCount)
         ci.minImageCount = caps.maxImageCount;
     ci.imageFormat = s_sc_format;
-    ci.imageExtent = s_sc_extent;
+    s_sc_logical_extent = s_sc_extent;
+    s_sc_rotation = 0;
     ci.imageArrayLayers = 1;
     ci.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     ci.preTransform = caps.currentTransform;
 #ifdef __ANDROID__
-    /* The renderer produces upright landscape frames. Declaring the panel's
-     * rotation as already applied makes Android rotate them a second time. */
+    /* Legacy output is upright landscape. Native pre-rotation must also
+     * rotate the pixels in the existing final pass, not only this flag. */
     if (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)
         ci.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
-    NFS_LOG_DEBUG("graphics", "  [VK] Android surface transform: current=%u, supported=%u, selected=%u\n",
-        caps.currentTransform, caps.supportedTransforms, ci.preTransform);
+    if (s_android_prerotate < 0) {
+        char property[PROP_VALUE_MAX] = {0};
+        __system_property_get("debug.nfsu.prerotate", property);
+        s_android_prerotate = present_rotation_requested(property);
+    }
+    if (s_android_prerotate && !s_android_prerotate_failed
+        && (caps.supportedTransforms & caps.currentTransform)
+        && (caps.currentTransform == VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR || present_rotation(caps.currentTransform))) {
+        ci.preTransform = caps.currentTransform;
+        s_sc_rotation = present_rotation(caps.currentTransform);
+        s_sc_extent = present_physical_extent(s_sc_logical_extent, s_sc_rotation);
+    }
 #endif
+    ci.imageExtent = s_sc_extent;
     ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     ci.presentMode = mode;
     ci.clipped = VK_TRUE;
@@ -2511,6 +2529,21 @@ static int create_swapchain(void)
     {
         VkSwapchainKHR sc;
         result = vkCreateSwapchainKHR(s_dev, &ci, NULL, &sc);
+#ifdef __ANDROID__
+        if (result != VK_SUCCESS && s_sc_rotation) {
+            NFS_LOG_WARN("graphics", "[VKROT] swapchain failed=%d; restoring legacy presentation\n", result);
+            s_android_prerotate_failed = 1;
+            s_sc_rotation = 0;
+            s_sc_extent = s_sc_logical_extent;
+            ci.imageExtent = s_sc_extent;
+            ci.preTransform = caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR
+                ? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR : caps.currentTransform;
+            /* Even a failed creation can retire oldSwapchain. The Android
+             * rebuild loop releases the old surface/chain before retrying. */
+            if (s_swapchain) return 0;
+            result = vkCreateSwapchainKHR(s_dev, &ci, NULL, &sc);
+        }
+#endif
         if (result != VK_SUCCESS) {
             NFS_LOG_ERROR("graphics", "  [VK] " "swapchain creation failed: %d\n", result);
             return 0;
@@ -2557,6 +2590,11 @@ static int create_swapchain(void)
     }
     NFS_LOG_DEBUG("graphics", "  [VK] swapchain %ux%u, %u images, format %d, present mode %d\n",
             s_sc_extent.width, s_sc_extent.height, s_sc_count, s_sc_format, mode);
+#ifdef __ANDROID__
+    NFS_LOG_INFO("graphics", "[VKROT] requested=%d failed=%d current=%u selected=%u rotation=%u logical=%ux%u buffer=%ux%u\n",
+        s_android_prerotate, s_android_prerotate_failed, caps.currentTransform, ci.preTransform, s_sc_rotation,
+        s_sc_logical_extent.width, s_sc_logical_extent.height, s_sc_extent.width, s_sc_extent.height);
+#endif
     return 1;
 }
 
@@ -4192,16 +4230,20 @@ static const char s_pp_vs[] =
 static const char s_pp_fs[] =
     "#version 450\n"
     "layout(set = 0, binding = 0) uniform sampler2D src;\n"
-    "layout(push_constant) uniform P { vec4 rect; vec4 rcp; } pc;\n"
+    "layout(push_constant) uniform P { vec4 rect; vec4 rcp; vec2 extent; } pc;\n"
     "layout(location = 0) out vec4 o;\n"
+    PRESENT_LOGICAL_COORD_GLSL
     "float L(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }\n"
     "float Lat(vec2 uv) { return L(textureLod(src, uv, 0.0).rgb); }\n"
     "#define LO(x, y) L(textureLodOffset(src, uv, 0.0, ivec2(x, y)).rgb)\n"
     "const float Q[8] = float[](1.0, 1.0, 1.0, 1.5, 2.0, 2.0, 4.0, 8.0);\n"
     "void main() {\n"
-    "    vec2 uv = (gl_FragCoord.xy - pc.rect.xy) / pc.rect.zw;\n"
+    "    int flags = int(pc.rcp.w);\n"
+    "    vec2 pos = logical_coord(gl_FragCoord.xy, pc.extent, flags & 3);\n"
+    "    vec2 uv = (pos - pc.rect.xy) / pc.rect.zw;\n"
     "    vec2 r = pc.rcp.xy;\n"
     "    vec4 cM = textureLod(src, uv, 0.0);\n"
+    "    if ((flags & 4) != 0) { o = vec4(cM.rgb, 1.0); return; }\n"
     "    float lM = L(cM.rgb), lD = LO(0, 1), lU = LO(0, -1), lL = LO(-1, 0), lR = LO(1, 0);\n"
     "    float mx = max(lM, max(max(lD, lU), max(lL, lR)));\n"
     "    float mn = min(lM, min(min(lD, lU), min(lL, lR)));\n"
@@ -4287,7 +4329,7 @@ static VkPipeline pp_pipe(VkFormat fmt)
         VkDescriptorSetLayoutBinding b = { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
                                            VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
         VkDescriptorSetLayoutCreateInfo lci = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-        VkPushConstantRange pr = { VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32 };
+        VkPushConstantRange pr = { VK_SHADER_STAGE_FRAGMENT_BIT, 0, 40 };
         VkPipelineLayoutCreateInfo pli = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
         VkSamplerCreateInfo sci = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
 #ifdef __ANDROID__
@@ -4372,17 +4414,19 @@ static VkPipeline pp_pipe(VkFormat fmt)
  * rendering; 0 = not recorded (use the blit). */
 static int present_fxaa(VkSurf *s, VkImage dst, VkImageView dview, VkFormat fmt, VkExtent2D ext,
                         int dx, int dy, int dw, int dh, VkImageLayout final,
-                        VkPipelineStageFlags final_stage)
+                        VkPipelineStageFlags final_stage, VkExtent2D logical, uint32_t rotation, int antialias)
 {
     VkPipeline pipe = pp_pipe(fmt);
     VkImageMemoryBarrier b = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
     VkRenderingAttachmentInfo ca = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
     VkRenderingInfo ri = { VK_STRUCTURE_TYPE_RENDERING_INFO };
-    VkViewport vp = { (float)dx, (float)dy, (float)dw, (float)dh, 0.0f, 1.0f };
     VkRect2D sc = { { dx, dy }, { (uint32_t)dw, (uint32_t)dh } };
+    sc = present_physical_rect(logical, sc, rotation);
+    VkViewport vp = { (float)sc.offset.x, (float)sc.offset.y,
+        (float)sc.extent.width, (float)sc.extent.height, 0.0f, 1.0f };
     VkDescriptorImageInfo ii;
     VkWriteDescriptorSet wr = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-    float pc[8];
+    float pc[10];
 
     if (!pipe || !dview)
         return 0;
@@ -4423,7 +4467,8 @@ static int present_fxaa(VkSurf *s, VkImage dst, VkImageView dview, VkFormat fmt,
     p_push_desc(s_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, s_pp_layout, 0, 1, &wr);
     pc[0] = (float)dx; pc[1] = (float)dy; pc[2] = (float)dw; pc[3] = (float)dh;
     pc[4] = 1.0f / (float)s->pw; pc[5] = 1.0f / (float)s->ph;
-    pc[6] = s_fxaa_subpix; pc[7] = 0.0f;
+    pc[6] = s_fxaa_subpix; pc[7] = (float)(rotation | (antialias ? 0u : 4u));
+    pc[8] = (float)logical.width; pc[9] = (float)logical.height;
     vkCmdPushConstants(s_cb, s_pp_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, pc);
     vkCmdDraw(s_cb, 3, 1, 0, 0);
     p_end_rendering(s_cb);
@@ -4459,7 +4504,7 @@ static void dump_fxaa(VkSurf *s, const char *path)
         VkExtent2D ext = { t.pw, t.ph };
         if (present_fxaa(s, t.image, t.view, VK_FORMAT_B8G8R8A8_UNORM, ext, 0, 0,
                          (int)t.pw, (int)t.ph, VK_IMAGE_LAYOUT_GENERAL,
-                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT))
+                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, ext, 0, 1))
             dump_surface(&t, path);
     }
 }
@@ -4692,18 +4737,30 @@ static void vk_flip_impl(void)
                 /* The logical aspect (16:9 for a widescreen title),
                  * letterboxed. Rows are top-first on both sides. */
                 float lw = (float)s->w / (float)s->aa_sx, lh = (float)s->h / (float)s->aa_sy;
-                float ww = (float)s_sc_extent.width, wh = (float)s_sc_extent.height, scale;
+                float ww = (float)s_sc_logical_extent.width, wh = (float)s_sc_logical_extent.height, scale;
                 if (xbox_video_widescreen() && lw < lh * 1.5f)
                     lw = lh * 16.0f / 9.0f;
                 scale = ww / lw < wh / lh ? ww / lw : wh / lh;
                 dw = (int)(lw * scale); dh = (int)(lh * scale);
                 dx = ((int)ww - dw) / 2; dy = ((int)wh - dh) / 2;
             }
-            if (dw > 0 && dh > 0 && fxaa_on()
+            int antialias = fxaa_on();
+            if (dw > 0 && dh > 0 && (antialias || s_sc_rotation)
                 && present_fxaa(s, dst, s_sc_views[idx], s_sc_format, s_sc_extent, dx, dy, dw, dh,
                                 VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                                VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT))
+                                VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, s_sc_logical_extent, s_sc_rotation, antialias))
                 goto presented;
+#ifdef __ANDROID__
+            if (s_sc_rotation && dw > 0 && dh > 0) {
+                /* A missing pipeline/view cannot safely use an unrotated
+                 * transfer blit into a rotated swapchain. Clear this frame
+                 * and rebuild with the legacy path on the next flip. */
+                NFS_LOG_ERROR("graphics", "[VKROT] final draw unavailable; restoring legacy presentation\n");
+                s_android_prerotate_failed = 1;
+                s_android_present = ANDROID_REBUILD_SWAPCHAIN;
+                dw = dh = 0;
+            }
+#endif
             b.srcAccessMask = 0;
             b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
             b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -4785,6 +4842,18 @@ static void vk_flip_impl(void)
         pr = vkQueuePresentKHR(s_queue, &pi);
         nfsu_perf_end(NFSU_PERF_VK_PRESENT, perf_present);
 #ifdef __ANDROID__
+        if (pr == VK_SUBOPTIMAL_KHR && s_sc_rotation) {
+            static uint32_t checked;
+            if (s_frame - checked >= 30) {
+                VkSurfaceCapabilitiesKHR caps;
+                checked = s_frame;
+                if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(s_pd, s_surface, &caps) == VK_SUCCESS
+                    && (present_rotation(caps.currentTransform) != s_sc_rotation
+                        || caps.currentExtent.width != s_sc_logical_extent.width
+                        || caps.currentExtent.height != s_sc_logical_extent.height))
+                    s_android_present = ANDROID_REBUILD_SWAPCHAIN;
+            }
+        }
         if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_ERROR_SURFACE_LOST_KHR) {
             NFS_LOG_DEBUG("graphics", "  [VK] " "Android present requires presentation rebuild: %d\n", pr);
             s_android_present = pr == VK_ERROR_SURFACE_LOST_KHR
