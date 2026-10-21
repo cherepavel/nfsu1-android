@@ -78,6 +78,7 @@ static void android_frame_reset(Frame *frame)
         vkDestroyFramebuffer(s_dev, frame->framebuffers[i], NULL);
     frame->nframebuffers = 0;
     if (frame->descriptors) vkResetDescriptorPool(s_dev, frame->descriptors, 0);
+    android_descriptor_cache_reset(frame);
 }
 
 static void VKAPI_PTR android_begin_rendering(VkCommandBuffer command, const VkRenderingInfo *info)
@@ -117,12 +118,12 @@ static void VKAPI_PTR android_end_rendering(VkCommandBuffer command)
     vkCmdEndRenderPass(command);
 }
 
-static void VKAPI_PTR android_push_descriptors(VkCommandBuffer command, VkPipelineBindPoint point,
-    VkPipelineLayout layout, uint32_t index, uint32_t count, const VkWriteDescriptorSet *writes)
+static void android_descriptor_pool_ready(void)
 {
     if (!s_f->descriptors) {
         VkDescriptorPoolSize sizes[2] = {
-            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 3 * 8192},
+            {s_android_dynamic_descriptors ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC
+                                          : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 3 * 8192},
             {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4 * 8192}
         };
         VkDescriptorPoolCreateInfo info = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -131,6 +132,12 @@ static void VKAPI_PTR android_push_descriptors(VkCommandBuffer command, VkPipeli
         info.pPoolSizes = sizes;
         if (vkCreateDescriptorPool(s_dev, &info, NULL, &s_f->descriptors) != VK_SUCCESS) abort();
     }
+}
+
+static void VKAPI_PTR android_push_descriptors(VkCommandBuffer command, VkPipelineBindPoint point,
+    VkPipelineLayout layout, uint32_t index, uint32_t count, const VkWriteDescriptorSet *writes)
+{
+    android_descriptor_pool_ready();
     VkDescriptorSetLayout dsl = count == 7 ? s_dsl : s_pp_dsl;
     VkDescriptorSetAllocateInfo allocate = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     allocate.descriptorPool = s_f->descriptors;

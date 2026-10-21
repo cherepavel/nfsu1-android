@@ -247,6 +247,7 @@ typedef struct {
     uint32_t        ngarbage, garbage_cap;
 #ifdef __ANDROID__
     VkDescriptorPool descriptors;
+    struct AndroidDescriptorCache *descriptor_cache;
     VkFramebuffer *framebuffers;
     uint32_t nframebuffers, framebuffer_cap;
 #endif
@@ -263,8 +264,11 @@ static int s_dyn_valid;
 
 #ifdef __ANDROID__
 static VkDescriptorSetLayout s_dsl, s_pp_dsl;
+static int s_android_dynamic_descriptors;
+static void android_descriptor_cache_reset(Frame *frame);
 #include "nv2a_vk_android.h"
 #include "nv2a_vk_push_descriptors.h"
+#include "nv2a_vk_dynamic_descriptors.h"
 #endif
 static void garbage_add_pipe(VkPipeline pipe);
 static void garbage_add(VkImage img, VkImageView view, VkDeviceMemory mem)
@@ -2752,6 +2756,16 @@ static int ready(void)
     s_gpu_period = pp.limits.timestampPeriod;
     s_ubo_align = pp.limits.minUniformBufferOffsetAlignment;
     s_ubo_range = pp.limits.maxUniformBufferRange;
+#ifdef __ANDROID__
+    {
+        char property[PROP_VALUE_MAX] = {0};
+        __system_property_get("debug.nfsu.dynamic_desc", property);
+        int requested = !strcmp(property, "1");
+        s_android_dynamic_descriptors = requested && pp.limits.maxDescriptorSetUniformBuffersDynamic >= 3;
+        NFS_LOG_INFO("graphics", "[VKDYN] requested=%d dynamic_limit=%u active=%d (startup only)\n",
+            requested, pp.limits.maxDescriptorSetUniformBuffersDynamic, s_android_dynamic_descriptors);
+    }
+#endif
     {
         const char *e = getenv("RECOMP_GL_SCALE");
         double k = e ? strtod(e, NULL) : 1.0;
@@ -2876,7 +2890,7 @@ static int ready(void)
     uint32_t push_limit = 0;
     int push_requested = android_push_requested();
     int push_supported = android_push_supported(s_pd, &push_limit);
-    s_android_native_push = push_requested && push_supported;
+    s_android_native_push = push_requested && push_supported && !s_android_dynamic_descriptors;
     if (s_android_native_push)
         dext[ndext++] = VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME;
 #else
@@ -2907,6 +2921,7 @@ static int ready(void)
 #define GET(p, name) p = (void *)vkGetDeviceProcAddr(s_dev, name); if (!p) { NFS_LOG_ERROR("graphics", "missing %s\n", name); return 0; }
 #ifdef __ANDROID__
     p_push_desc = android_push_descriptors;
+    if (s_android_dynamic_descriptors) p_push_desc = android_dynamic_descriptors;
     if (s_android_native_push) {
         PFN_vkCmdPushDescriptorSetKHR native_push =
             (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(s_dev, "vkCmdPushDescriptorSetKHR");
@@ -2952,6 +2967,10 @@ static int ready(void)
             b[i].descriptorCount = 1;
             b[i].descriptorType = i < 2 || i == 6 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
                                                   : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+#ifdef __ANDROID__
+            if (s_android_dynamic_descriptors && (i < 2 || i == 6))
+                b[i].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+#endif
             b[i].stageFlags = i == 0 || i == 6 ? VK_SHADER_STAGE_VERTEX_BIT
                                                : VK_SHADER_STAGE_FRAGMENT_BIT;
         }
