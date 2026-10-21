@@ -26,7 +26,7 @@ static void begin_rendering(VkSurf *s, VkDepthBuf *d)
         !s->clear_pending && !(d && d->clear_pending))
         return;
     end_rendering();
-    barrier_all();
+    barrier_before_rendering();
     ca.imageView = s->view;
     ca.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     ca.loadOp = s->clear_pending ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;

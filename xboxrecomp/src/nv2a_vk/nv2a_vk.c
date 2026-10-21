@@ -480,6 +480,7 @@ typedef struct {
     uint32_t aa_sx, aa_sy;
     int dirty;                 /* written since the last barrier */
     uint32_t gen;              /* bumped by every draw and clear into it */
+    uint32_t screen_seen, screen_frame; /* selected as flip output recently */
     int clear_pending;
     VkClearColorValue clear_value;
 } VkSurf;
@@ -549,18 +550,10 @@ static int         s_in_render;
 static VkSurf     *s_rt;
 static VkDepthBuf *s_rt_depth;
 
-static void barrier_all(void)
-{
-    if (s_f->gpu_queries) s_f->gpu_barriers++;
-    VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER };
-    int i;
-    mb.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
-    mb.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-    vkCmdPipelineBarrier(s_cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
-    for (i = 0; i < VK_MAX_SURF; i++)
-        s_surf[i].dirty = 0;
-}
+#ifdef __ANDROID__
+#include "nv2a_vk_unused_depth.h"
+#endif
+#include "nv2a_vk_barrier.h"
 
 static void end_rendering_at(const char *reason)
 {
@@ -3778,7 +3771,13 @@ static void vk_draw_raw_impl(const Nv2aRawBatch *b)
 
     /* Submit before this draw uploads/binds vertices. Android's vertex
      * bindings would otherwise be lost if begin_rendering switched buffers. */
-    if (kick_due(s_in_render && s_rt == s && s_rt_depth == d))
+#ifdef __ANDROID__
+    int omit_unused_depth = unused_depth_enabled();
+    VkDepthBuf *kick_depth = draw_depth_attachment(s, d, r, omit_unused_depth);
+#else
+    VkDepthBuf *kick_depth = d;
+#endif
+    if (kick_due(s_in_render && s_rt == s && s_rt_depth == kick_depth))
         kick_submit();
     s_kick_draws++;
 
@@ -3802,6 +3801,11 @@ static void vk_draw_raw_impl(const Nv2aRawBatch *b)
         }
     }
 #ifdef __ANDROID__
+    /* Ring overflow or an early submit may have ended the old pass. Select
+     * again against the actual pass that will receive this draw. PipeKey and
+     * begin_rendering must agree about the presence of depth/stencil. */
+    d = draw_depth_attachment(s, d, r, omit_unused_depth);
+    key.depth = d != NULL;
     if (!upload_vertices(b)) return;
     static const uint32_t offsets[11] = {0x308,0x39C,0x3A0,0x30C,0x35C,0x354,0x32C,0x370,0x374,0x378,0x364};
     key.topo = topo;
@@ -4520,6 +4524,7 @@ static void vk_flip_impl(void)
     s_rt = NULL;
     s_rt_depth = NULL;
 #ifdef __ANDROID__
+    if (s && s_drew_any) mark_screen_target(s);
     /* One completed guest command sequence per nonzero request token.
      * This frame's logging is excluded from benchmarks. */
     {

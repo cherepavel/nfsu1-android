@@ -66,6 +66,7 @@ static void end_rendering(void)
     frame.gpu_active_pass = -1;
 }
 static void barrier_all(void) { barriers++; }
+static void barrier_before_rendering(void) { barriers++; }
 static void set_viewport(uint32_t w, uint32_t h) { assert(w && h); }
 static void p_begin_rendering(VkCommandBuffer command, const VkRenderingInfo *info)
 {
@@ -101,6 +102,7 @@ VKAPI_ATTR void VKAPI_CALL vkCmdClearDepthStencilImage(VkCommandBuffer command,
     depth_value = *value;
     depth_transfers++;
 }
+#include "../xboxrecomp/src/nv2a_vk/nv2a_vk_unused_depth.h"
 #include "../xboxrecomp/src/nv2a_vk/nv2a_vk_render_pass.h"
 int main(void)
 {
@@ -114,6 +116,7 @@ int main(void)
     clear[1].aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
     clear[1].clearValue.depthStencil = (VkClearDepthStencilValue){.25f,19};
     assert(!lazy_clears_enabled()); /* Host policy remains disabled. */
+    assert(!unused_depth_enabled());
 #ifdef __ANDROID__
     property_value = "1";
     assert(!lazy_clears_enabled());
@@ -209,6 +212,43 @@ int main(void)
     begin_rendering(&a,&depth);
     assert(timestamps == before && !frame.gpu_pass_count && frame.gpu_active_pass == -1);
     assert(frame.gpu_passes == passes_before + 1);
+    end_rendering();
+    /* The omitted image retains its contents for a later depth-using pass.
+     * Exercise selection together with the actual pass/clear helpers. */
+    uint32_t regs[0x400 / 4] = {0};
+    unsigned depth_passes_before = frame.gpu_depth_passes;
+    uint64_t depth_stores_before = frame.gpu_depth_store_pixels;
+    assert(!draw_depth_attachment(&a,&depth,regs,1));
+    begin_rendering(&a,draw_depth_attachment(&a,&depth,regs,1));
+    assert(!s_rt_depth && frame.gpu_depth_passes == depth_passes_before);
+    assert(frame.gpu_depth_store_pixels == depth_stores_before);
+    regs[0x30C / 4] = 1;
+    begin_rendering(&a,draw_depth_attachment(&a,&depth,regs,1));
+    assert(s_rt_depth == &depth && frame.gpu_depth_passes == depth_passes_before + 1);
+    assert(depth_load == VK_ATTACHMENT_LOAD_OP_LOAD);
+    regs[0x30C / 4] = 0;
+    assert(draw_depth_attachment(&a,&depth,regs,1) == &depth); /* No split. */
+    before = begins;
+    begin_rendering(&a,draw_depth_attachment(&a,&depth,regs,1));
+    assert(begins == before);
+    end_rendering();
+    /* Refined mode keeps an offscreen pass intact and omits the recent
+     * screen target's idle attachment, with no extra pass on following UI. */
+    assert(draw_depth_attachment(&b,&depth,regs,2) == &depth);
+    mark_screen_target(&a);
+    before = begins;
+    begin_rendering(&a,draw_depth_attachment(&a,&depth,regs,2));
+    assert(!s_rt_depth && begins == before + 1);
+    begin_rendering(&a,draw_depth_attachment(&a,&depth,regs,2));
+    assert(begins == before + 1);
+    end_rendering();
+    b.clear_pending = 0;
+    before = begins;
+    begin_rendering(&b,draw_depth_attachment(&b,&depth,regs,2));
+    assert(s_rt_depth == &depth);
+    regs[0x30C / 4] = 1;
+    begin_rendering(&b,draw_depth_attachment(&b,&depth,regs,2));
+    assert(begins == before + 1); /* Offscreen prefix + depth use stay together. */
     end_rendering();
     puts("Deferred clears: full/partial eligibility, load ops, shared depth, overwrite, color-read materialization: PASS");
 }
