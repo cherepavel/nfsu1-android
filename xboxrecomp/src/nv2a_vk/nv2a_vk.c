@@ -264,6 +264,7 @@ static int s_dyn_valid;
 #ifdef __ANDROID__
 static VkDescriptorSetLayout s_dsl, s_pp_dsl;
 #include "nv2a_vk_android.h"
+#include "nv2a_vk_push_descriptors.h"
 #endif
 static void garbage_add_pipe(VkPipeline pipe);
 static void garbage_add(VkImage img, VkImageView view, VkDeviceMemory mem)
@@ -2871,7 +2872,14 @@ static int ready(void)
     f2.features.samplerAnisotropy = s_aniso > 1.0f ? VK_TRUE : VK_FALSE;
     if (!s_headless)
         dext[ndext++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
-#ifndef __ANDROID__
+#ifdef __ANDROID__
+    uint32_t push_limit = 0;
+    int push_requested = android_push_requested();
+    int push_supported = android_push_supported(s_pd, &push_limit);
+    s_android_native_push = push_requested && push_supported;
+    if (s_android_native_push)
+        dext[ndext++] = VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME;
+#else
     dext[ndext++] = VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME;
     dext[ndext++] = VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME;
 #endif
@@ -2881,7 +2889,17 @@ static int ready(void)
     dci.enabledExtensionCount = ndext;
     dci.ppEnabledExtensionNames = dext;
     (void)feds;
-    if (vkCreateDevice(s_pd, &dci, NULL, &s_dev) != VK_SUCCESS) {
+    VkResult device_result = vkCreateDevice(s_pd, &dci, NULL, &s_dev);
+#ifdef __ANDROID__
+    if (device_result != VK_SUCCESS && s_android_native_push) {
+        NFS_LOG_WARN("graphics", "[VKDESC] native device creation failed (%d); retrying fallback\n", device_result);
+        /* On Android the optional push extension was appended last. */
+        dci.enabledExtensionCount = --ndext;
+        s_android_native_push = 0;
+        device_result = vkCreateDevice(s_pd, &dci, NULL, &s_dev);
+    }
+#endif
+    if (device_result != VK_SUCCESS) {
         NFS_LOG_ERROR("graphics", "  [VK] " "vkCreateDevice failed (needs push descriptors, dynamic vertex input, Vulkan 1.3)\n");
         return 0;
     }
@@ -2889,6 +2907,17 @@ static int ready(void)
 #define GET(p, name) p = (void *)vkGetDeviceProcAddr(s_dev, name); if (!p) { NFS_LOG_ERROR("graphics", "missing %s\n", name); return 0; }
 #ifdef __ANDROID__
     p_push_desc = android_push_descriptors;
+    if (s_android_native_push) {
+        PFN_vkCmdPushDescriptorSetKHR native_push =
+            (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(s_dev, "vkCmdPushDescriptorSetKHR");
+        if (native_push) p_push_desc = native_push;
+        else {
+            s_android_native_push = 0;
+            NFS_LOG_WARN("graphics", "[VKDESC] native function missing; retaining descriptor-set fallback\n");
+        }
+    }
+    NFS_LOG_INFO("graphics", "[VKDESC] requested=%d supported=%d max_push=%u native=%d\n",
+        push_requested, push_supported, push_limit, s_android_native_push);
     p_begin_rendering = android_begin_rendering;
     p_end_rendering = android_end_rendering;
 #else
@@ -2926,7 +2955,9 @@ static int ready(void)
             b[i].stageFlags = i == 0 || i == 6 ? VK_SHADER_STAGE_VERTEX_BIT
                                                : VK_SHADER_STAGE_FRAGMENT_BIT;
         }
-        #ifndef __ANDROID__
+#ifdef __ANDROID__
+        lci.flags = android_descriptor_layout_flags();
+#else
         lci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
 #endif
         lci.bindingCount = 7;
@@ -4240,7 +4271,9 @@ static VkPipeline pp_pipe(VkFormat fmt)
         VkPushConstantRange pr = { VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32 };
         VkPipelineLayoutCreateInfo pli = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
         VkSamplerCreateInfo sci = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
-        #ifndef __ANDROID__
+#ifdef __ANDROID__
+        lci.flags = android_descriptor_layout_flags();
+#else
         lci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
 #endif
         lci.bindingCount = 1;
