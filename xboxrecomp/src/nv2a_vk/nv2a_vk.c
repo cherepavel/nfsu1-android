@@ -90,6 +90,9 @@ static int s_trace;
 static int s_vtrace;
 #define VT(...) do { if (s_vtrace > 0) { NFS_LOG_TRACE("graphics", "  [VKT] " __VA_ARGS__); fflush(stderr); } } while (0)
 static uint32_t s_frame;
+#ifdef __ANDROID__
+#include "nv2a_vk_specialization.h"
+#endif
 /* RECOMP_TEX_CHANGES=1: log every cached texture whose guest bytes changed
  * (re-uploaded). Finds textures a title frees while still drawing them. */
 static int s_tex_changes = -1;
@@ -3740,27 +3743,12 @@ static void vk_draw_raw_impl(const Nv2aRawBatch *b)
     static const uint32_t offsets[11] = {0x308,0x39C,0x3A0,0x30C,0x35C,0x354,0x32C,0x370,0x374,0x378,0x364};
     key.topo = topo;
     {
-        static int zero_source = -1;
-        if (zero_source < 0) {
-            char property[PROP_VALUE_MAX] = {0};
-            __system_property_get("debug.nfsu.zero_source", property);
-            zero_source = strcmp(property, "1") == 0;
-            NFS_LOG_INFO("graphics", "[VK] zero source specialization=%d (experimental)\n", zero_source);
-        }
-        key.zero_source = zero_source && zero_source_safe(r[0x304/4], r[0x344/4],
+        VkShaderSpecialization mode = android_shader_specialization();
+        key.zero_source = mode.zero_source && zero_source_safe(r[0x304/4], r[0x344/4],
             r[0x348/4], r[0x350/4], r[0x300/4], r[0x33C/4], p->pkey.shader_program);
-    }
-    {
-        static int specialize = -1;
-        if (specialize < 0) {
-            char property[PROP_VALUE_MAX] = {0};
-            __system_property_get("debug.nfsu.alpha_specialize", property);
-            specialize = strcmp(property, "1") == 0;
-            NFS_LOG_INFO("graphics", "[VK] alpha specialization=%d (experimental)\n", specialize);
-        }
         /* Preserve the existing uniform test unless this draw unconditionally
          * passes. CLIP_PLANE discards remain independent of this constant. */
-        key.alpha_test = !specialize || (r[0x300 / 4] && r[0x33C / 4] != 0x207);
+        key.alpha_test = !mode.alpha || (r[0x300 / 4] && r[0x33C / 4] != 0x207);
     }
     for (i = 0; i < 11; i++) key.state[i] = r[offsets[i] / 4];
     for (i = 0; i < 16; i++) {

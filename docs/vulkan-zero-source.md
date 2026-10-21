@@ -1,8 +1,10 @@
-# Experimental zero-source fragment specialization
+# Zero-source fragment specialization
 
-Android opt-in: `debug.nfsu.zero_source=1`, then restart the game process.
-The default is 0; rollback is `setprop debug.nfsu.zero_source 0` and restart.
-The startup log reports `zero source specialization=N`.
+Enabled by default on Android. `debug.nfsu.zero_source=0` selects the original
+fragment path; `1` or an unset property enables specialization. Properties are checked every 300 renderer
+flips; `[VKSPEC] alpha=N zero_source=M frame=...` confirms live changes.
+The flags already belong to the pipeline key, so each mode selects its own
+cached pipelines. Exclude transition/warmup windows from comparisons.
 
 In the confirmed ASUS car menu, target 82A4ED80 (2133x1200) has seven draws:
 a full-image fade with source factor ZERO and destination CONSTANT_COLOR,
@@ -23,6 +25,9 @@ comparisons and clipping retain the original shader. Vertex processing,
 geometry, depth/stencil, scissor, output masks and blending are unchanged.
 The specialization is part of the Android pipeline key; the default fragment
 path and GL output retain their prior behavior. No graphics option is lowered.
+
+The 2026-10-20 same-process comparison and the evidence for enabling this by
+default on Android are recorded in [the live comparison](vulkan-specialization-live-ab.md).
 
 ## Checks and observations
 

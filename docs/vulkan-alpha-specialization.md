@@ -1,13 +1,14 @@
-# Experimental Android alpha-test specialization
+# Android alpha-test specialization
 
-Android can select `debug.nfsu.alpha_specialize=1` before process startup.
-The default is 0. Restart the game process after changing the property.
-`[VK] alpha specialization=N` confirms the selected mode. To roll back:
+Enabled by default on Android. `debug.nfsu.alpha_specialize=0` selects the
+original uniform-driven shader; `1` or an unset property enables specialization.
+Properties are checked every 300 renderer flips; `[VKSPEC] alpha=N
+zero_source=M frame=...` confirms live changes. The flags already belong
+to the pipeline key, so each mode selects distinct cached pipelines.
+Exclude transition/warmup windows from comparisons. To roll back:
 
 ```sh
 adb shell setprop debug.nfsu.alpha_specialize 0
-adb shell am force-stop org.nfsu.android
-adb shell am start -n org.nfsu.android/.LauncherActivity
 ```
 
 The Vulkan fragment shader has a Boolean specialization constant (ID 0,
@@ -21,6 +22,9 @@ specialization map entry size. The shader key and program-record layout are
 unchanged; generated GLSL changes naturally invalidate the SPIR-V source hash.
 The GL dialect output is unchanged, and non-Android Vulkan uses the default
 true constant.
+
+The 2026-10-20 same-process comparison and the evidence for enabling this by
+default on Android are recorded in [the live comparison](vulkan-specialization-live-ab.md).
 
 This lets the driver compile out a potentially fragment-discarding path on
 opaque draws. It does not force early fragment tests on alpha-tested geometry.
