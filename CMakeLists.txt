@@ -135,8 +135,8 @@ if(WIN32)
 else()
     # The generated chunks are huge straight-line functions; -O1 keeps GCC's
     # memory and time per chunk sane while still allocating registers. The
-    # Switch's CPU is the bottleneck there, so it gets -O2.
-    if(NINTENDO_SWITCH)
+    # Switch and Android are CPU-bound, so their lifted code uses -O2.
+    if(NINTENDO_SWITCH OR ANDROID)
         set(NFSU2_GEN_OPT "-O2" CACHE STRING "Optimisation for the lifted code")
     else()
         set(NFSU2_GEN_OPT "-O1" CACHE STRING "Optimisation for the lifted code")
@@ -148,6 +148,10 @@ else()
     option(NFSU2_LTO "Link-time optimisation of the lifted code" OFF)
     set(NFSU2_LTO_JOBS "4" CACHE STRING "Parallel LTO link jobs")
     set(NFSU2_GEN_FLAGS "${NFSU2_GEN_OPT};-w;-fno-strict-aliasing;-fwrapv")
+    if(ANDROID)
+        # Lifted SSE/x87 operations have separate guest rounding boundaries.
+        list(APPEND NFSU2_GEN_FLAGS "-ffp-contract=off")
+    endif()
     if(NFSU2_LTO)
         list(APPEND NFSU2_GEN_FLAGS "-flto=auto")
         set_property(SOURCE src/recomp_manual.c APPEND PROPERTY

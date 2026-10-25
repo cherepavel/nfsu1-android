@@ -31,6 +31,9 @@ recompilation pipeline, and builds the APK. The default XBE location is
 `game/Need For Speed Underground/default.xbe` relative to the repository root.
 Override it with `-Pnfsu.xbe=/path/to/default.xbe`; use
 `-Pnfsu.python=/path/to/python3` for a different Python interpreter.
+Android lifted code defaults to `-O2`, with FP contraction disabled. Use
+`-Pnfsu.genOpt=-O1` for a compiler return/repeat comparison. CPU-heavy audio
+voice processing and final mixdown also use `-O2` in Debug builds.
 Generation tracks its inputs and writes under `android/app/build/`, so `clean` removes
 all generated Android sources. No game data is packaged in the APK.
 

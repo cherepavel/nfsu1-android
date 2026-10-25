@@ -13,6 +13,14 @@ add_library(xbox_apu STATIC
     apu_xaudio2.c
 )
 
+if(ANDROID)
+    # VP and final mixdown are measured CPU hotspots. Android Debug otherwise
+    # builds them at O0, including the per-sample filter/mix/resampling loops.
+    # Preserve separate float operations; do not enable fast-math or FMA.
+    set_source_files_properties(apu_vp.c apu_dsp.c PROPERTIES
+        COMPILE_OPTIONS "-O2;-ffp-contract=off")
+endif()
+
 target_include_directories(xbox_apu PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 # qemu_shim.h lives in nv2a/ - shared QEMU type abstraction

@@ -16,7 +16,7 @@ val xbe = providers.gradleProperty("nfsu.xbe")
     .orElse(provider { localSettings.getProperty("nfsu.xbe", "game/Need For Speed Underground/default.xbe") })
     .map { repository.resolve(it) }
 // Keep compiler experiments reproducible through the normal Gradle entry point.
-val generatedOptimization = providers.gradleProperty("nfsu.genOpt").orElse("-O1")
+val generatedOptimization = providers.gradleProperty("nfsu.genOpt").orElse("-O2")
 require(generatedOptimization.get() in listOf("-O1", "-O2", "-O3")) {
     "nfsu.genOpt must be -O1, -O2 or -O3"
 }
