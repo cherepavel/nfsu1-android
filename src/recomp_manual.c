@@ -32,6 +32,15 @@
 #define RECOMP_GENERATED_CODE
 #include "recomp_funcs.h"
 
+/* Packed Xbox matrix multiply -> ARM64 NEON, preserving its guest ABI. */
+extern void sub_00169F4A_gen(void);
+extern int nfsu_matrix_native(void);
+void sub_00169F4A(void)
+{
+    RECOMP_PREEMPT();
+    if (!nfsu_matrix_native()) sub_00169F4A_gen();
+}
+
 /* Software movie decoder's table-based YUV -> 32-bit RGB row conversion. */
 extern void sub_0019D840_gen(void);
 extern int nfsu_movie_yuv_native(void);
