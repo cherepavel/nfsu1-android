@@ -196,5 +196,6 @@ int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out);
  * ponytail: the title supplies the address instead of the executor resolving
  * the semaphore context DMA object through RAMIN. */
 void nv2a_pb_set_semaphore_target(uint32_t guest_va);
+int nv2a_pb_wait_semaphore(uint32_t guest_va, uint32_t submitted, uint32_t delta);
 
 #endif /* NV2A_BACKEND_H */

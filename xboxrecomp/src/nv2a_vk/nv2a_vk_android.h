@@ -1,29 +1,51 @@
 /* Vulkan 1.1 path for Android drivers without dynamic rendering, push
  * descriptors or extended dynamic state. Included after Frame/s_cb. */
-static struct { VkFormat format; int depth, clear; VkRenderPass pass; } s_android_passes[8];
+#include "nv2a_vk_framebuffer_cache.h"
+static struct { VkFormat format; int depth, present, clears; VkRenderPass pass; } s_android_passes[32];
 
-static VkRenderPass android_render_pass(VkFormat format, int depth, int clear)
+/* Live A/B control; one property read per 300 flips, never per draw. */
+static int android_framebuffer_cache_enabled(void)
+{
+    static int enabled = -1;
+    static uint32_t checked;
+    if (enabled < 0 || s_frame - checked >= 300) {
+        char property[PROP_VALUE_MAX] = {0};
+        __system_property_get("debug.nfsu.framebuffer_cache", property);
+        int next = strcmp(property, "0") != 0;
+        NFS_LOG_INFO("performance", "[VKFB] cache=%d next_cache=%d hits=%u creates=%u (since last report)\n",
+            enabled < 0 ? next : enabled, next,
+            s_android_framebuffer_hits, s_android_framebuffer_creates);
+        enabled = next;
+        checked = s_frame;
+        s_android_framebuffer_hits = s_android_framebuffer_creates = 0;
+    }
+    return enabled;
+}
+
+static VkRenderPass android_render_pass(VkFormat format, int depth, int present, int clears)
 {
     unsigned i;
-    for (i = 0; i < 8; i++) {
+    for (i = 0; i < 32; i++) {
         if (s_android_passes[i].pass && s_android_passes[i].format == format
-            && s_android_passes[i].depth == depth && s_android_passes[i].clear == clear)
+            && s_android_passes[i].depth == depth && s_android_passes[i].present == present
+            && s_android_passes[i].clears == clears)
             return s_android_passes[i].pass;
         if (!s_android_passes[i].pass) break;
     }
-    if (i == 8) { NFS_LOG_FATAL("graphics", "  [VK] " "render pass cache full\n"); abort(); }
+    if (i == 32) { NFS_LOG_FATAL("graphics", "  [VK] " "render pass cache full\n"); abort(); }
     VkAttachmentDescription attachments[2] = {0};
     attachments[0].format = format;
     attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
-    attachments[0].loadOp = clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+    attachments[0].loadOp = (clears & 1) ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
     attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    attachments[0].initialLayout = attachments[0].finalLayout = clear
+    attachments[0].initialLayout = attachments[0].finalLayout = present
         ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL;
     attachments[1].format = s_depth_fmt;
     attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
-    attachments[1].loadOp = attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    attachments[1].loadOp = attachments[1].stencilLoadOp = (clears & 2)
+        ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
     attachments[1].storeOp = attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
     attachments[1].initialLayout = attachments[1].finalLayout = VK_IMAGE_LAYOUT_GENERAL;
     VkAttachmentReference color = {0, attachments[0].finalLayout};
@@ -44,7 +66,8 @@ static VkRenderPass android_render_pass(VkFormat format, int depth, int clear)
     }
     s_android_passes[i].format = format;
     s_android_passes[i].depth = depth;
-    s_android_passes[i].clear = clear;
+    s_android_passes[i].present = present;
+    s_android_passes[i].clears = clears;
     s_android_passes[i].pass = pass;
     return pass;
 }
@@ -55,13 +78,17 @@ static void android_frame_reset(Frame *frame)
         vkDestroyFramebuffer(s_dev, frame->framebuffers[i], NULL);
     frame->nframebuffers = 0;
     if (frame->descriptors) vkResetDescriptorPool(s_dev, frame->descriptors, 0);
+    android_descriptor_cache_reset(frame);
 }
 
 static void VKAPI_PTR android_begin_rendering(VkCommandBuffer command, const VkRenderingInfo *info)
 {
-    int clear = info->pColorAttachments[0].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR;
-    VkRenderPass pass = android_render_pass(clear ? s_sc_format : VK_FORMAT_B8G8R8A8_UNORM,
-        info->pDepthAttachment != NULL, clear);
+    int present = info->pColorAttachments[0].imageLayout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    int clears = info->pColorAttachments[0].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR;
+    if (info->pDepthAttachment && info->pDepthAttachment->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR)
+        clears |= 2;
+    VkRenderPass pass = android_render_pass(present ? s_sc_format : VK_FORMAT_B8G8R8A8_UNORM,
+        info->pDepthAttachment != NULL, present, clears);
     VkImageView views[2] = {info->pColorAttachments[0].imageView, VK_NULL_HANDLE};
     if (info->pDepthAttachment) views[1] = info->pDepthAttachment->imageView;
     VkFramebufferCreateInfo create = {VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
@@ -71,24 +98,17 @@ static void VKAPI_PTR android_begin_rendering(VkCommandBuffer command, const VkR
     create.width = info->renderArea.extent.width;
     create.height = info->renderArea.extent.height;
     create.layers = 1;
-    VkFramebuffer framebuffer;
-    if (vkCreateFramebuffer(s_dev, &create, NULL, &framebuffer) != VK_SUCCESS) {
+    VkFramebuffer framebuffer = android_framebuffer_get(&create, android_framebuffer_cache_enabled());
+    if (!framebuffer) {
         NFS_LOG_FATAL("graphics", "  [VK] " "framebuffer creation failed\n"); abort();
     }
-    if (s_f->nframebuffers == s_f->framebuffer_cap) {
-        uint32_t cap = s_f->framebuffer_cap ? s_f->framebuffer_cap * 2 : 64;
-        VkFramebuffer *next = realloc(s_f->framebuffers, cap * sizeof(*next));
-        if (!next) abort();
-        s_f->framebuffers = next;
-        s_f->framebuffer_cap = cap;
-    }
-    s_f->framebuffers[s_f->nframebuffers++] = framebuffer;
     VkClearValue values[2] = {info->pColorAttachments[0].clearValue, {0}};
+    if (info->pDepthAttachment) values[1] = info->pDepthAttachment->clearValue;
     VkRenderPassBeginInfo begin = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     begin.renderPass = pass;
     begin.framebuffer = framebuffer;
     begin.renderArea = info->renderArea;
-    begin.clearValueCount = clear ? 1 : 0;
+    begin.clearValueCount = (clears & 2) ? 2 : clears ? 1 : 0;
     begin.pClearValues = values;
     vkCmdBeginRenderPass(command, &begin, VK_SUBPASS_CONTENTS_INLINE);
 }
@@ -98,12 +118,12 @@ static void VKAPI_PTR android_end_rendering(VkCommandBuffer command)
     vkCmdEndRenderPass(command);
 }
 
-static void VKAPI_PTR android_push_descriptors(VkCommandBuffer command, VkPipelineBindPoint point,
-    VkPipelineLayout layout, uint32_t index, uint32_t count, const VkWriteDescriptorSet *writes)
+static void android_descriptor_pool_ready(void)
 {
     if (!s_f->descriptors) {
         VkDescriptorPoolSize sizes[2] = {
-            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 3 * 8192},
+            {s_android_dynamic_descriptors ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC
+                                          : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 3 * 8192},
             {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4 * 8192}
         };
         VkDescriptorPoolCreateInfo info = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -112,6 +132,12 @@ static void VKAPI_PTR android_push_descriptors(VkCommandBuffer command, VkPipeli
         info.pPoolSizes = sizes;
         if (vkCreateDescriptorPool(s_dev, &info, NULL, &s_f->descriptors) != VK_SUCCESS) abort();
     }
+}
+
+static void VKAPI_PTR android_push_descriptors(VkCommandBuffer command, VkPipelineBindPoint point,
+    VkPipelineLayout layout, uint32_t index, uint32_t count, const VkWriteDescriptorSet *writes)
+{
+    android_descriptor_pool_ready();
     VkDescriptorSetLayout dsl = count == 7 ? s_dsl : s_pp_dsl;
     VkDescriptorSetAllocateInfo allocate = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     allocate.descriptorPool = s_f->descriptors;

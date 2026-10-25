@@ -13,6 +13,16 @@ static unsigned active, total;
 static HANDLE parked_event;
 static DWORD parked_tid;
 static RecompContext probe_context;
+static unsigned poll_waits;
+static int native_poll_probe(const RecompSpinWait *poll, int block)
+{
+    assert(poll->pc==0x001D0470 && poll->ax==4 && poll->cx==19
+        && poll->dx==0x123400 && poll->si==24);
+    assert(t_gil_depth==(block ? 0 : 2));
+    assert(xgs_state(GetCurrentThreadId())==(block ? XGS_HOST_CALL : XGS_RUNNING));
+    if (block) poll_waits++;
+    return 1;
+}
 static void probe_kernel_boundary(void)
 {
     assert(recomp_context_current()->kernel.native_kernel_frames == 1);
@@ -130,6 +140,10 @@ int main(void)
     assert(recomp_context_init(&fresh, 0x7000));
     assert(!recomp_context_switch(&fresh)); /* Native scheduler still owns this GIL. */
     assert(t_gil_depth == 2);
+    xbox_set_spin_wait_hook(native_poll_probe);
+    recomp_spin_yield_at(0x001D0470,4,19,0x123400,24);
+    assert(poll_waits==1 && t_gil_depth==2 && xgs_state(GetCurrentThreadId())==XGS_RUNNING);
+    xbox_set_spin_wait_hook(NULL);
     uint64_t before = nfsu_perf_gil_wait_sum();
     assert(WaitForSingleObject(parked_event, INFINITE) == WAIT_OBJECT_0);
     assert(before == nfsu_perf_gil_wait_sum()); /* Ready object never drops the token. */

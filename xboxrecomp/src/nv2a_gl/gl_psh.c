@@ -281,7 +281,17 @@ static void tex_fetch(Out *o, int t, uint32_t mode, const Nv2aPshKey *k)
     }
 }
 
-int nv2a_gl_psh(const Nv2aPshKey *k, char *buf, size_t cap)
+int nv2a_gl_psh_compact_eligible(const Nv2aPshKey *k)
+{
+    /* Exact active state observed in the menu. Inactive stages do not execute.
+     * Be deliberately conservative about texture modes, routing and flags. */
+    return k->control == 1 && k->shader_program == 1 && k->other_input == 0
+        && k->color_icw[0] == 0x08040000 && k->color_ocw[0] == 0x000100c0
+        && k->alpha_icw[0] == 0x18143030 && k->alpha_ocw[0] == 0x000100c0
+        && k->final0 == 0x13010c00 && k->final1 == 0x00001c00;
+}
+
+static int psh_source(const Nv2aPshKey *k, char *buf, size_t cap, int compact)
 {
     Out o = { buf, cap, 0 };
     uint32_t count = k->control & 0xFF;
@@ -295,6 +305,8 @@ int nv2a_gl_psh(const Nv2aPshKey *k, char *buf, size_t cap)
          * samplerCube for a CUBE_MAP stage. */
         emit(&o,
             "#version 450\n"
+            "layout(constant_id = 0) const bool nfsu_alpha_test = true;\n"
+            "layout(constant_id = 1) const bool nfsu_zero_source = false;\n"
             "layout(location = 0) in vec4 vD0; layout(location = 1) in vec4 vD1;\n"
             "layout(location = 2) in vec4 vT0; layout(location = 3) in vec4 vT1;\n"
             "layout(location = 4) in vec4 vT2; layout(location = 5) in vec4 vT3;\n"
@@ -327,6 +339,20 @@ int nv2a_gl_psh(const Nv2aPshKey *k, char *buf, size_t cap)
         "uniform int u_alpha_func; uniform float u_alpha_ref;\n"
         "out vec4 fragColor;\n"
         "void main() {\n");
+    if (nv2a_shader_vk)
+        emit(&o, "    if (nfsu_zero_source) { fragColor = vec4(0.0); return; }\n");
+    if (compact) {
+        /* Preserve the generic generator's operation order and all clamps.
+         * The unused CD/SUM, secondary registers and EF have no side effects. */
+        emit(&o,
+            "    vec2 tc0 = abs(vT0.w) > 1e-8 ? vT0.xy / vT0.w : vT0.xy;\n"
+            "    vec4 T0 = texture(t0, tc0 * u_tscale[0]);\n"
+            "    vec4 R0 = clamp((max(T0, 0.0) * max(vD0, 0.0)) * 2.0, -1.0, 1.0);\n"
+            "    vec3 fA = vec3(clamp(clamp(vFog, 0.0, 1.0), 0.0, 1.0));\n"
+            "    vec3 fB = clamp(u_fc0.rgb, 0.0, 1.0);\n"
+            "    vec3 fC = clamp(R0.rgb, 0.0, 1.0);\n"
+            "    fragColor = vec4(fA * fB + (1.0 - fA) * fC + vec3(0.0), clamp(R0.a, 0.0, 1.0));\n");
+    } else {
     for (i = 0; i < 4; i++)
         tex_fetch(&o, (int)i, (k->shader_program >> (5 * i)) & 0x1F, k);
     emit(&o,
@@ -357,8 +383,11 @@ int nv2a_gl_psh(const Nv2aPshKey *k, char *buf, size_t cap)
         emit(&o, "    float fG = "); final_input(&o, cw1 >> 8, 1, k); emit(&o, ";\n");
         emit(&o, "    fragColor = vec4(fA * fB + (1.0 - fA) * fC + fD, fG);\n");
     }
+    } /* generic body */
+    emit(&o, "    fragColor = clamp(fragColor, 0.0, 1.0);\n");
+    if (nv2a_shader_vk)
+        emit(&o, "    if (nfsu_alpha_test) {\n");
     emit(&o,
-        "    fragColor = clamp(fragColor, 0.0, 1.0);\n"
         "    float ar = fragColor.a * 255.0;\n"
         "    bool pass = true;\n"
         "    if (u_alpha_func == 0x200) pass = false;\n"
@@ -368,7 +397,20 @@ int nv2a_gl_psh(const Nv2aPshKey *k, char *buf, size_t cap)
         "    else if (u_alpha_func == 0x204) pass = ar >  u_alpha_ref;\n"
         "    else if (u_alpha_func == 0x205) pass = ar != u_alpha_ref;\n"
         "    else if (u_alpha_func == 0x206) pass = ar >= u_alpha_ref;\n"
-        "    if (!pass) discard;\n"
-        "}\n");
+        "    if (!pass) discard;\n");
+    if (nv2a_shader_vk)
+        emit(&o, "    }\n");
+    emit(&o, "}\n");
     return o.overflow ? -1 : (int)(cap - o.left);
+}
+
+int nv2a_gl_psh(const Nv2aPshKey *k, char *buf, size_t cap)
+{
+    return psh_source(k, buf, cap, 0);
+}
+
+int nv2a_gl_psh_compact(const Nv2aPshKey *k, char *buf, size_t cap)
+{
+    if (!nv2a_shader_vk || !nv2a_gl_psh_compact_eligible(k)) return -1;
+    return psh_source(k, buf, cap, 1);
 }

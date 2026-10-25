@@ -32,6 +32,15 @@
 #define RECOMP_GENERATED_CODE
 #include "recomp_funcs.h"
 
+/* Software movie decoder's table-based YUV -> 32-bit RGB row conversion. */
+extern void sub_0019D840_gen(void);
+extern int nfsu_movie_yuv_native(void);
+void sub_0019D840(void)
+{
+    RECOMP_PREEMPT();
+    if (!nfsu_movie_yuv_native()) sub_0019D840_gen();
+}
+
 #ifdef __ANDROID__
 #include <pthread.h>
 #include <time.h>
@@ -320,6 +329,7 @@ void sub_001B3640(void) { crt_memmove(); }
 #define NFSU2_D3D_DEVICE_PTR 0x001DE9E8u
 extern void nv2a_pb_set_semaphore_target(uint32_t guest_va);
 extern void sub_001D0340_gen(void);
+extern void nfsu_d3d_fence_wait_init(void);
 
 void sub_001D0340(void)
 {
@@ -330,6 +340,7 @@ void sub_001D0340(void)
     if (exec < 0)
         exec = getenv("RECOMP_PB_EXEC") != NULL;
     if (exec) {
+        nfsu_d3d_fence_wait_init();
         static uint32_t registered;
         if (sem && sem != registered) {
             nv2a_pb_set_semaphore_target(sem);
@@ -923,6 +934,8 @@ static const int s_scale_pct[] = { 100, 150, 200, 250 };
 static const int s_aniso_lvl[] = { 1, 2, 4, 8, 16 };
 
 static int s_blur = 1;                  /* native blur enabled by default */
+static uint32_t s_bloom_saved;
+static int s_bloom_overridden;
 static int s_fps60;                     /* experimental; default 30 FPS */
 static int s_refl = 1;                  /* 0 off, 1 on */
 static int s_scale_idx = 1;             /* into s_scale_pct: 1.5x */
@@ -1524,6 +1537,23 @@ void sub_00016050(void)
     uint32_t native_blur = MEM32(0x00260CC0u);
     uint32_t blur_limit = MEM32(0x0021C0B4u);
     int n;
+
+    /* Frame Effects (15370 -> 28FF0) runs AFTER this world-render call.
+     * Its native bloom-enable flag is independent of the speed-blur cap.
+     * Keep the option in force across that later stage, restoring the
+     * captured native value when the user enables Blur/Bloom again. */
+    if (!s_blur) {
+        if (!s_bloom_overridden) {
+            s_bloom_saved = MEM32(0x0021C0A8u);
+            s_bloom_overridden = 1;
+            NFS_LOG_INFO("system", "[options] disabling native bloom (saved=%u)\n", s_bloom_saved);
+        }
+        MEM32(0x0021C0A8u) = 0;
+    } else if (s_bloom_overridden) {
+        MEM32(0x0021C0A8u) = s_bloom_saved;
+        s_bloom_overridden = 0;
+        NFS_LOG_INFO("system", "[options] restoring native bloom=%u\n", s_bloom_saved);
+    }
 
     /* 11100/11140/11150 set the native blur request. 286E0 smooths it
      * through 264FA4. 286E0 adds speed blur and clamps its intensity to

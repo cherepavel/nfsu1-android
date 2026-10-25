@@ -90,6 +90,9 @@ static int s_trace;
 static int s_vtrace;
 #define VT(...) do { if (s_vtrace > 0) { NFS_LOG_TRACE("graphics", "  [VKT] " __VA_ARGS__); fflush(stderr); } } while (0)
 static uint32_t s_frame;
+#ifdef __ANDROID__
+#include "nv2a_vk_specialization.h"
+#endif
 /* RECOMP_TEX_CHANGES=1: log every cached texture whose guest bytes changed
  * (re-uploaded). Finds textures a title frees while still drawing them. */
 static int s_tex_changes = -1;
@@ -132,6 +135,11 @@ static VkDeviceSize     s_ubo_align = 256;
 static uint32_t         s_ubo_range = 16384;
 static VkFormat         s_depth_fmt = VK_FORMAT_D24_UNORM_S8_UINT;
 static int              s_have_bc, s_have_depth_clamp;
+/* Opt-in GPU queue timestamps. Intervals include queue bubbles, not just
+ * shader occupancy; no extra submit, fence wait or query WAIT bit is used. */
+static float s_gpu_period;
+static uint32_t s_gpu_bits;
+static int s_gpu_profile;
 
 static PFN_vkCmdPushDescriptorSetKHR  p_push_desc;
 static PFN_vkCmdSetVertexInputEXT     p_vertex_input;
@@ -161,6 +169,12 @@ static AndroidHostWindow s_android_window;
 #endif
 static VkFormat       s_sc_format;
 static VkExtent2D     s_sc_extent;
+static VkExtent2D     s_sc_logical_extent;
+static uint32_t       s_sc_rotation;
+#include "nv2a_vk_prerotation.h"
+#ifdef __ANDROID__
+static int s_android_prerotate = -1, s_android_prerotate_failed;
+#endif
 static uint32_t       s_sc_count;
 static VkImage        s_sc_images[8];
 static VkImageView    s_sc_views[8];
@@ -204,6 +218,8 @@ static VkDeviceMemory alloc_mem(VkMemoryRequirements rq, VkMemoryPropertyFlags w
 
 #define VK_FRAMES 2
 #define VK_CBS 8
+#define GPU_PASS_LIMIT 64
+#define GPU_QUERY_COUNT (3 + GPU_PASS_LIMIT * 2)
 #define RING_BYTES (48u << 20)
 
 typedef struct {
@@ -221,10 +237,23 @@ typedef struct {
     uint8_t        *ring_ptr;
     VkDeviceSize    ring_off;
     int             submitted;
+    VkQueryPool     gpu_queries;
+    uint32_t gpu_passes, gpu_barriers, gpu_pass_barriers, gpu_blits;
+    uint64_t gpu_draws, gpu_indices;
+    uint32_t gpu_depth_passes;
+    uint64_t gpu_depth_load_pixels, gpu_depth_store_pixels;
+    uint32_t gpu_pass_count;
+    int gpu_active_pass;
+    struct {
+        uint32_t target, width, height, clears, depth;
+        uint64_t draws, indices, compact_eligible, compact_selected;
+        const char *end_reason;
+    } gpu_targets[GPU_PASS_LIMIT];
     Garbage        *garbage;
     uint32_t        ngarbage, garbage_cap;
 #ifdef __ANDROID__
     VkDescriptorPool descriptors;
+    struct AndroidDescriptorCache *descriptor_cache;
     VkFramebuffer *framebuffers;
     uint32_t nframebuffers, framebuffer_cap;
 #endif
@@ -241,12 +270,19 @@ static int s_dyn_valid;
 
 #ifdef __ANDROID__
 static VkDescriptorSetLayout s_dsl, s_pp_dsl;
+static int s_android_dynamic_descriptors;
+static void android_descriptor_cache_reset(Frame *frame);
 #include "nv2a_vk_android.h"
+#include "nv2a_vk_push_descriptors.h"
+#include "nv2a_vk_dynamic_descriptors.h"
 #endif
 static void garbage_add_pipe(VkPipeline pipe);
 static void garbage_add(VkImage img, VkImageView view, VkDeviceMemory mem)
 {
     Frame *f = s_f;
+#ifdef __ANDROID__
+    android_framebuffer_retire_view(view, f);
+#endif
     if (f->ngarbage == f->garbage_cap) {
         f->garbage_cap = f->garbage_cap ? f->garbage_cap * 2 : 64;
         f->garbage = (Garbage *)realloc(f->garbage, f->garbage_cap * sizeof *f->garbage);
@@ -280,6 +316,111 @@ static void garbage_free(Frame *f)
     f->ngarbage = 0;
 }
 
+static void gpu_report(Frame *f)
+{
+    static uint64_t count, last;
+    static double game_sum, present_sum, game_max, present_max;
+    static uint64_t passes, barriers, pass_barriers, blits, draws, indices;
+    static uint64_t depth_passes, depth_load_pixels, depth_store_pixels;
+    static struct {
+        uint32_t target, width, height, depth;
+        const char *end_reason;
+        uint64_t calls, draws, indices, compact_eligible, compact_selected;
+        double ms;
+    } targets[GPU_PASS_LIMIT];
+    static double overflow_ms;
+    uint64_t ticks[3];
+    if (!f->gpu_queries || vkGetQueryPoolResults(s_dev, f->gpu_queries,
+            0, 3, sizeof ticks, ticks, sizeof ticks[0], VK_QUERY_RESULT_64_BIT) != VK_SUCCESS)
+        return;
+    uint64_t mask = s_gpu_bits >= 64 ? UINT64_MAX : (1ull << s_gpu_bits) - 1;
+    double game = ((ticks[1] - ticks[0]) & mask) * (double)s_gpu_period / 1e6;
+    double present = ((ticks[2] - ticks[1]) & mask) * (double)s_gpu_period / 1e6;
+    game_sum += game;
+    present_sum += present;
+    if (game > game_max) game_max = game;
+    if (present > present_max) present_max = present;
+    count++;
+    passes += f->gpu_passes;
+    barriers += f->gpu_barriers;
+    pass_barriers += f->gpu_pass_barriers;
+    blits += f->gpu_blits;
+    draws += f->gpu_draws;
+    indices += f->gpu_indices;
+    depth_passes += f->gpu_depth_passes;
+    depth_load_pixels += f->gpu_depth_load_pixels;
+    depth_store_pixels += f->gpu_depth_store_pixels;
+    uint64_t pass_ticks[GPU_PASS_LIMIT * 2];
+    if (f->gpu_pass_count && vkGetQueryPoolResults(s_dev, f->gpu_queries,
+            3, f->gpu_pass_count * 2, sizeof pass_ticks, pass_ticks,
+            sizeof pass_ticks[0], VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+        for (uint32_t i = 0; i < f->gpu_pass_count; i++) {
+            const char *reason = f->gpu_targets[i].end_reason;
+            if (!reason) reason = "unknown";
+            double ms = ((pass_ticks[i * 2 + 1] - pass_ticks[i * 2]) & mask)
+                * (double)s_gpu_period / 1e6;
+            uint32_t j;
+            for (j = 0; j < GPU_PASS_LIMIT; j++) {
+                if (!targets[j].calls) {
+                    targets[j].target = f->gpu_targets[i].target;
+                    targets[j].width = f->gpu_targets[i].width;
+                    targets[j].height = f->gpu_targets[i].height;
+                    targets[j].depth = f->gpu_targets[i].depth;
+                    targets[j].end_reason = reason;
+                    break;
+                }
+                if (targets[j].target == f->gpu_targets[i].target
+                    && targets[j].width == f->gpu_targets[i].width
+                    && targets[j].height == f->gpu_targets[i].height
+                    && targets[j].depth == f->gpu_targets[i].depth
+                    && !strcmp(targets[j].end_reason, reason)) break;
+            }
+            if (j == GPU_PASS_LIMIT) overflow_ms += ms;
+            else {
+                targets[j].calls++;
+                targets[j].ms += ms;
+                targets[j].draws += f->gpu_targets[i].draws;
+                targets[j].indices += f->gpu_targets[i].indices;
+                targets[j].compact_eligible += f->gpu_targets[i].compact_eligible;
+                targets[j].compact_selected += f->gpu_targets[i].compact_selected;
+            }
+        }
+    }
+    uint64_t now = hz_now();
+    if (!last) last = now;
+    if (now - last >= 5000000000ull) {
+        NFS_LOG_INFO("performance", "[GPU5] frames=%llu game_ms=%.3f game_max_ms=%.3f present_ms=%.3f present_max_ms=%.3f passes=%.1f full_barriers=%.1f blits=%.1f pass_barriers=%.1f guest_draws=%.1f guest_indices=%.0f depth_passes=%.1f depth_load_mpix=%.3f depth_store_mpix=%.3f\n",
+            (unsigned long long)count, game_sum / count, game_max,
+            present_sum / count, present_max, (double)passes / count,
+            (double)barriers / count, (double)blits / count, (double)pass_barriers / count,
+            (double)draws / count, (double)indices / count,
+            (double)depth_passes / count, (double)depth_load_pixels / count / 1e6,
+            (double)depth_store_pixels / count / 1e6);
+        for (unsigned rank = 0; rank < 10; rank++) {
+            unsigned best = GPU_PASS_LIMIT;
+            for (unsigned j = 0; j < GPU_PASS_LIMIT; j++)
+                if (targets[j].calls && (best == GPU_PASS_LIMIT || targets[j].ms > targets[best].ms)) best = j;
+            if (best == GPU_PASS_LIMIT) break;
+            NFS_LOG_INFO("performance", "[GPUPASS] rank=%u target=%08X size=%ux%u end=%s ms_per_frame=%.3f calls_per_frame=%.1f draws_per_frame=%.1f indices_per_frame=%.0f compact_eligible_per_frame=%.1f compact_selected_per_frame=%.1f depth=%u\n",
+                rank + 1, targets[best].target, targets[best].width, targets[best].height,
+                targets[best].end_reason,
+                targets[best].ms / count, (double)targets[best].calls / count,
+                (double)targets[best].draws / count, (double)targets[best].indices / count,
+                (double)targets[best].compact_eligible / count, (double)targets[best].compact_selected / count,
+                targets[best].depth);
+            targets[best].calls = 0;
+        }
+        if (overflow_ms > 0)
+            NFS_LOG_INFO("performance", "[GPUPASS] overflow_ms_per_frame=%.3f\n", overflow_ms / count);
+        memset(targets, 0, sizeof targets);
+        overflow_ms = 0;
+        count = passes = barriers = pass_barriers = blits = draws = indices = 0;
+        depth_passes = depth_load_pixels = depth_store_pixels = 0;
+        game_sum = present_sum = game_max = present_max = 0;
+        last = now;
+    }
+}
+
 static void frame_begin(void)
 {
     VkCommandBufferBeginInfo bi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
@@ -288,9 +429,16 @@ static void frame_begin(void)
         uint64_t perf_fence = nfsu_perf_begin();
         vkWaitForFences(s_dev, 1, &s_f->fence, VK_TRUE, UINT64_MAX);
         nfsu_perf_end(NFSU_PERF_VK_FENCE, perf_fence);
+        gpu_report(s_f);
         vkResetFences(s_dev, 1, &s_f->fence);
         s_f->submitted = 0;
     }
+    s_f->gpu_passes = s_f->gpu_barriers = s_f->gpu_pass_barriers = s_f->gpu_blits = 0;
+    s_f->gpu_draws = s_f->gpu_indices = 0;
+    s_f->gpu_depth_passes = 0;
+    s_f->gpu_depth_load_pixels = s_f->gpu_depth_store_pixels = 0;
+    s_f->gpu_pass_count = 0;
+    s_f->gpu_active_pass = -1;
     garbage_free(s_f);
     s_f->ring_off = 0;
     s_ring_gen++;
@@ -299,6 +447,10 @@ static void frame_begin(void)
     s_f->ncb = 0;
     s_cb = s_f->cbs[0];
     vkBeginCommandBuffer(s_cb, &bi);
+    if (s_f->gpu_queries) {
+        vkCmdResetQueryPool(s_cb, s_f->gpu_queries, 0, s_gpu_profile == 1 ? GPU_QUERY_COUNT : 3);
+        vkCmdWriteTimestamp(s_cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, s_f->gpu_queries, 0);
+    }
     s_cb_gen++;
     s_dyn_valid = 0;
     s_kick_draws = 0;
@@ -339,12 +491,17 @@ typedef struct {
     uint32_t aa_sx, aa_sy;
     int dirty;                 /* written since the last barrier */
     uint32_t gen;              /* bumped by every draw and clear into it */
+    uint32_t screen_seen, screen_frame; /* selected as flip output recently */
+    int clear_pending;
+    VkClearColorValue clear_value;
 } VkSurf;
 
 typedef struct {
     uint32_t va, pw, ph;
     VkImage image; VkImageView view; VkDeviceMemory mem;
     uint32_t used;
+    int clear_pending;
+    VkClearDepthStencilValue clear_value;
 } VkDepthBuf;
 
 #define VK_MAX_SURF 32
@@ -404,25 +561,25 @@ static int         s_in_render;
 static VkSurf     *s_rt;
 static VkDepthBuf *s_rt_depth;
 
-static void barrier_all(void)
-{
-    VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER };
-    int i;
-    mb.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
-    mb.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-    vkCmdPipelineBarrier(s_cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
-    for (i = 0; i < VK_MAX_SURF; i++)
-        s_surf[i].dirty = 0;
-}
+#ifdef __ANDROID__
+#include "nv2a_vk_unused_depth.h"
+#endif
+#include "nv2a_vk_barrier.h"
 
-static void end_rendering(void)
+static void end_rendering_at(const char *reason)
 {
     if (s_in_render) {
         p_end_rendering(s_cb);
+        if (s_f->gpu_queries && s_f->gpu_active_pass >= 0) {
+            s_f->gpu_targets[s_f->gpu_active_pass].end_reason = reason;
+            vkCmdWriteTimestamp(s_cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                s_f->gpu_queries, 4 + (uint32_t)s_f->gpu_active_pass * 2);
+            s_f->gpu_active_pass = -1;
+        }
         s_in_render = 0;
     }
 }
+#define end_rendering() end_rendering_at(__func__)
 
 static VkRect2D s_sc_cur;               /* scissor set in this pass */
 
@@ -460,43 +617,7 @@ static void set_surface_scissor(const uint32_t *r, const VkSurf *s)
     }
 }
 
-static void begin_rendering(VkSurf *s, VkDepthBuf *d)
-{
-    VkRenderingAttachmentInfo ca = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
-    VkRenderingAttachmentInfo da = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
-    VkRenderingInfo ri = { VK_STRUCTURE_TYPE_RENDERING_INFO };
-
-    if (s_in_render && s_rt == s && s_rt_depth == d)
-        return;
-    end_rendering();
-    barrier_all();
-    ca.imageView = s->view;
-    ca.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    ca.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-    ca.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    ri.renderArea.extent.width = s->pw;
-    ri.renderArea.extent.height = s->ph;
-    if (d) {
-        if (d->pw < ri.renderArea.extent.width) ri.renderArea.extent.width = d->pw;
-        if (d->ph < ri.renderArea.extent.height) ri.renderArea.extent.height = d->ph;
-    }
-    ri.layerCount = 1;
-    ri.colorAttachmentCount = 1;
-    ri.pColorAttachments = &ca;
-    if (d) {
-        da.imageView = d->view;
-        da.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-        da.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-        da.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        ri.pDepthAttachment = &da;
-        ri.pStencilAttachment = &da;
-    }
-    p_begin_rendering(s_cb, &ri);
-    s_in_render = 1;
-    s_rt = s;
-    s_rt_depth = d;
-    set_viewport(s->pw, s->ph);
-}
+#include "nv2a_vk_render_pass.h"
 
 /* An image in GENERAL layout, from UNDEFINED; recorded outside rendering. */
 static void image_to_general(VkImage img, VkImageAspectFlags aspect)
@@ -686,6 +807,7 @@ static void rescale_surfaces(double k)
         uint32_t pw, ph;
         if (!s->image)
             continue;
+        color_ready(s);
         stored_size(s->w, s->h, s->aa_sx, &pw, &ph);
         if (pw == s->pw && ph == s->ph)
             continue;
@@ -710,6 +832,7 @@ static void rescale_surfaces(double k)
         bl.dstOffsets[1].x = (int32_t)pw;
         bl.dstOffsets[1].y = (int32_t)ph;
         bl.dstOffsets[1].z = 1;
+        if (s_f->gpu_queries) s_f->gpu_blits++;
         vkCmdBlitImage(s_cb, s->image, VK_IMAGE_LAYOUT_GENERAL, img,
                        VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
         garbage_add(s->image, s->view, s->mem);
@@ -1035,6 +1158,7 @@ static void gen_mips(VkImage img, uint32_t w, uint32_t h, uint32_t levels, uint3
         bl.dstOffsets[1].x = (int32_t)w;
         bl.dstOffsets[1].y = (int32_t)h;
         bl.dstOffsets[1].z = 1;
+        if (s_f->gpu_queries) s_f->gpu_blits++;
         vkCmdBlitImage(s_cb, img, VK_IMAGE_LAYOUT_GENERAL, img,
                        VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
     }
@@ -1347,6 +1471,7 @@ static VkImageView cube_from_surfaces(uint32_t va, uint32_t w, uint32_t h, uint3
         VkImageBlit bl;
         if (!sf || (c->src[f] == sf && c->gen[f] == sf->gen))
             continue;
+        color_ready(sf);
         if (!copied) {
             end_rendering();
             barrier_all();
@@ -1364,6 +1489,7 @@ static VkImageView cube_from_surfaces(uint32_t va, uint32_t w, uint32_t h, uint3
         bl.dstOffsets[1].x = (int32_t)size;
         bl.dstOffsets[1].y = (int32_t)size;
         bl.dstOffsets[1].z = 1;
+        if (s_f->gpu_queries) s_f->gpu_blits++;
         vkCmdBlitImage(s_cb, sf->image, VK_IMAGE_LAYOUT_GENERAL, c->image,
                        VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
         c->src[f] = sf;
@@ -1519,6 +1645,7 @@ static void bind_stage(const uint32_t *regs, int i, float scale[2], VkDescriptor
             }
         }
     } else if (rt) {
+        color_ready(rt);
         out->imageView = rt->view;
         *sampled = rt;
         rt_scale(w, h, rt->w, rt->h, rt->aa_sx, rt->aa_sy, scale);
@@ -1557,7 +1684,8 @@ static VkPipelineCache       s_pcache;
 typedef struct {
     uint64_t   vkey;
     Nv2aPshKey pkey;
-    VkShaderModule vs, fs;
+    VkShaderModule vs, fs, fs_compact;
+    int compact_attempted;
     uint32_t   used;
     uint32_t   hash;
     int        next;
@@ -1912,6 +2040,7 @@ static VkProg *prog_get(const Nv2aRawBatch *b, const Nv2aPshKey *pk)
         pipes_forget_prog((int)(p - s_prog));
         vkDestroyShaderModule(s_dev, p->vs, NULL);
         vkDestroyShaderModule(s_dev, p->fs, NULL);
+        if (p->fs_compact) vkDestroyShaderModule(s_dev, p->fs_compact, NULL);
         s_prog_live--;
     }
     memset(p, 0, sizeof *p);
@@ -1950,10 +2079,12 @@ static VkProg *prog_get(const Nv2aRawBatch *b, const Nv2aPshKey *pk)
     return p;
 }
 
+#include "nv2a_vk_zero_source.h"
 typedef struct {
     int      prog;
     uint32_t blend, bsrc, bdst, beq, cmask, depth, topo;
 #ifdef __ANDROID__
+    uint32_t alpha_test, zero_source, compact; /* fragment specialization constants, VkBool32 */
     uint32_t state[11], strides[16], formats[16];
 #endif
 } PipeKey;
@@ -2109,7 +2240,26 @@ static VkPipeline pipe_get(const PipeKey *k)
     st[0].pName = "main";
     st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
     st[1].module = p->fs;
+#ifdef __ANDROID__
+    if (k->compact) {
+        if (!p->compact_attempted) {
+            char source[4096];
+            p->compact_attempted = 1;
+            int bytes = nv2a_gl_psh_compact(&p->pkey, source, sizeof source);
+            if (bytes >= 0) p->fs_compact = compile(GLSLANG_STAGE_FRAGMENT, source);
+            NFS_LOG_INFO("graphics", "[VKCOMPACT] prog=%d bytes=%d compiled=%d\n",
+                k->prog, bytes, p->fs_compact != VK_NULL_HANDLE);
+        }
+        if (p->fs_compact) st[1].module = p->fs_compact;
+    }
+#endif
     st[1].pName = "main";
+#ifdef __ANDROID__
+    VkBool32 specialization_values[2] = {k->alpha_test, k->zero_source};
+    VkSpecializationMapEntry entries[2] = {{0, 0, sizeof(VkBool32)}, {1, sizeof(VkBool32), sizeof(VkBool32)}};
+    VkSpecializationInfo specialization = {2, entries, sizeof specialization_values, specialization_values};
+    st[1].pSpecializationInfo = &specialization;
+#endif
     ia.topology = k->topo == 0 ? VK_PRIMITIVE_TOPOLOGY_POINT_LIST
                 : k->topo == 1 ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST
                                : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -2160,7 +2310,7 @@ static VkPipeline pipe_get(const PipeKey *k)
     ds.front.compareOp = cmp_op(k->state[10], 0x207);
     ds.back = ds.front;
     dy.dynamicStateCount = 6;
-    ci.renderPass = android_render_pass(cfmt, k->depth, 0);
+    ci.renderPass = android_render_pass(cfmt, k->depth, 0, 0);
 #else
     ci.pNext = &rci;
 #endif
@@ -2348,18 +2498,30 @@ static int create_swapchain(void)
     if (caps.maxImageCount && ci.minImageCount > caps.maxImageCount)
         ci.minImageCount = caps.maxImageCount;
     ci.imageFormat = s_sc_format;
-    ci.imageExtent = s_sc_extent;
+    s_sc_logical_extent = s_sc_extent;
+    s_sc_rotation = 0;
     ci.imageArrayLayers = 1;
     ci.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     ci.preTransform = caps.currentTransform;
 #ifdef __ANDROID__
-    /* The renderer produces upright landscape frames. Declaring the panel's
-     * rotation as already applied makes Android rotate them a second time. */
+    /* Legacy output is upright landscape. Native pre-rotation must also
+     * rotate the pixels in the existing final pass, not only this flag. */
     if (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)
         ci.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
-    NFS_LOG_DEBUG("graphics", "  [VK] Android surface transform: current=%u, supported=%u, selected=%u\n",
-        caps.currentTransform, caps.supportedTransforms, ci.preTransform);
+    if (s_android_prerotate < 0) {
+        char property[PROP_VALUE_MAX] = {0};
+        __system_property_get("debug.nfsu.prerotate", property);
+        s_android_prerotate = present_rotation_requested(property);
+    }
+    if (s_android_prerotate && !s_android_prerotate_failed
+        && (caps.supportedTransforms & caps.currentTransform)
+        && (caps.currentTransform == VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR || present_rotation(caps.currentTransform))) {
+        ci.preTransform = caps.currentTransform;
+        s_sc_rotation = present_rotation(caps.currentTransform);
+        s_sc_extent = present_physical_extent(s_sc_logical_extent, s_sc_rotation);
+    }
 #endif
+    ci.imageExtent = s_sc_extent;
     ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     ci.presentMode = mode;
     ci.clipped = VK_TRUE;
@@ -2367,11 +2529,29 @@ static int create_swapchain(void)
     {
         VkSwapchainKHR sc;
         result = vkCreateSwapchainKHR(s_dev, &ci, NULL, &sc);
+#ifdef __ANDROID__
+        if (result != VK_SUCCESS && s_sc_rotation) {
+            NFS_LOG_WARN("graphics", "[VKROT] swapchain failed=%d; restoring legacy presentation\n", result);
+            s_android_prerotate_failed = 1;
+            s_sc_rotation = 0;
+            s_sc_extent = s_sc_logical_extent;
+            ci.imageExtent = s_sc_extent;
+            ci.preTransform = caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR
+                ? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR : caps.currentTransform;
+            /* Even a failed creation can retire oldSwapchain. The Android
+             * rebuild loop releases the old surface/chain before retrying. */
+            if (s_swapchain) return 0;
+            result = vkCreateSwapchainKHR(s_dev, &ci, NULL, &sc);
+        }
+#endif
         if (result != VK_SUCCESS) {
             NFS_LOG_ERROR("graphics", "  [VK] " "swapchain creation failed: %d\n", result);
             return 0;
         }
         for (i = 0; i < 8; i++) {
+#ifdef __ANDROID__
+            android_framebuffer_retire_view(s_sc_views[i], NULL);
+#endif
             if (s_sc_views[i]) vkDestroyImageView(s_dev, s_sc_views[i], NULL);
             s_sc_views[i] = VK_NULL_HANDLE;
 #ifdef __ANDROID__
@@ -2410,6 +2590,11 @@ static int create_swapchain(void)
     }
     NFS_LOG_DEBUG("graphics", "  [VK] swapchain %ux%u, %u images, format %d, present mode %d\n",
             s_sc_extent.width, s_sc_extent.height, s_sc_count, s_sc_format, mode);
+#ifdef __ANDROID__
+    NFS_LOG_INFO("graphics", "[VKROT] requested=%d failed=%d current=%u selected=%u rotation=%u logical=%ux%u buffer=%ux%u\n",
+        s_android_prerotate, s_android_prerotate_failed, caps.currentTransform, ci.preTransform, s_sc_rotation,
+        s_sc_logical_extent.width, s_sc_logical_extent.height, s_sc_extent.width, s_sc_extent.height);
+#endif
     return 1;
 }
 
@@ -2436,6 +2621,7 @@ static void android_release_presentation(void)
     uint32_t i;
     android_presentation_idle();
     for (i = 0; i < 8; i++) {
+        android_framebuffer_retire_view(s_sc_views[i], NULL);
         if (s_sc_views[i]) vkDestroyImageView(s_dev, s_sc_views[i], NULL);
         s_sc_views[i] = VK_NULL_HANDLE;
         if (s_sc_rendered[i]) vkDestroySemaphore(s_dev, s_sc_rendered[i], NULL);
@@ -2605,8 +2791,19 @@ static int ready(void)
     vkGetPhysicalDeviceProperties(s_pd, &pp);
     NFS_LOG_INFO("graphics", "  [VK] %s, Vulkan %u.%u.%u\n", pp.deviceName, VK_API_VERSION_MAJOR(pp.apiVersion),
             VK_API_VERSION_MINOR(pp.apiVersion), VK_API_VERSION_PATCH(pp.apiVersion));
+    s_gpu_period = pp.limits.timestampPeriod;
     s_ubo_align = pp.limits.minUniformBufferOffsetAlignment;
     s_ubo_range = pp.limits.maxUniformBufferRange;
+#ifdef __ANDROID__
+    {
+        char property[PROP_VALUE_MAX] = {0};
+        __system_property_get("debug.nfsu.dynamic_desc", property);
+        int requested = !strcmp(property, "1");
+        s_android_dynamic_descriptors = requested && pp.limits.maxDescriptorSetUniformBuffersDynamic >= 3;
+        NFS_LOG_INFO("graphics", "[VKDYN] requested=%d dynamic_limit=%u active=%d (startup only)\n",
+            requested, pp.limits.maxDescriptorSetUniformBuffersDynamic, s_android_dynamic_descriptors);
+    }
+#endif
     {
         const char *e = getenv("RECOMP_GL_SCALE");
         double k = e ? strtod(e, NULL) : 1.0;
@@ -2695,6 +2892,23 @@ static int ready(void)
     }
 #endif
 
+    {
+        const char *profile = getenv("RECOMP_VK_GPU_PROFILE");
+#ifdef __ANDROID__
+        char property[PROP_VALUE_MAX];
+        if (!profile && __system_property_get("debug.nfsu.gpu_profile", property) > 0)
+            profile = property;
+#endif
+        s_gpu_bits = qf[s_qfam].timestampValidBits;
+        s_gpu_profile = 0;
+        if (profile && s_gpu_bits && s_gpu_period > 0) {
+            if (!strcmp(profile, "1")) s_gpu_profile = 1;
+            if (!strcmp(profile, "2")) s_gpu_profile = 2;
+        }
+        NFS_LOG_INFO("graphics", "[GPU] timestamps=%d valid_bits=%u period_ns=%g mode=%d pass_timestamps=%d\n",
+            s_gpu_profile != 0, s_gpu_bits, (double)s_gpu_period,
+            s_gpu_profile, s_gpu_profile == 1);
+    }
     qci.queueFamilyIndex = s_qfam;
     qci.queueCount = 1;
     qci.pQueuePriorities = &prio;
@@ -2710,7 +2924,14 @@ static int ready(void)
     f2.features.samplerAnisotropy = s_aniso > 1.0f ? VK_TRUE : VK_FALSE;
     if (!s_headless)
         dext[ndext++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
-#ifndef __ANDROID__
+#ifdef __ANDROID__
+    uint32_t push_limit = 0;
+    int push_requested = android_push_requested();
+    int push_supported = android_push_supported(s_pd, &push_limit);
+    s_android_native_push = push_requested && push_supported && !s_android_dynamic_descriptors;
+    if (s_android_native_push)
+        dext[ndext++] = VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME;
+#else
     dext[ndext++] = VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME;
     dext[ndext++] = VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME;
 #endif
@@ -2720,7 +2941,17 @@ static int ready(void)
     dci.enabledExtensionCount = ndext;
     dci.ppEnabledExtensionNames = dext;
     (void)feds;
-    if (vkCreateDevice(s_pd, &dci, NULL, &s_dev) != VK_SUCCESS) {
+    VkResult device_result = vkCreateDevice(s_pd, &dci, NULL, &s_dev);
+#ifdef __ANDROID__
+    if (device_result != VK_SUCCESS && s_android_native_push) {
+        NFS_LOG_WARN("graphics", "[VKDESC] native device creation failed (%d); retrying fallback\n", device_result);
+        /* On Android the optional push extension was appended last. */
+        dci.enabledExtensionCount = --ndext;
+        s_android_native_push = 0;
+        device_result = vkCreateDevice(s_pd, &dci, NULL, &s_dev);
+    }
+#endif
+    if (device_result != VK_SUCCESS) {
         NFS_LOG_ERROR("graphics", "  [VK] " "vkCreateDevice failed (needs push descriptors, dynamic vertex input, Vulkan 1.3)\n");
         return 0;
     }
@@ -2728,6 +2959,18 @@ static int ready(void)
 #define GET(p, name) p = (void *)vkGetDeviceProcAddr(s_dev, name); if (!p) { NFS_LOG_ERROR("graphics", "missing %s\n", name); return 0; }
 #ifdef __ANDROID__
     p_push_desc = android_push_descriptors;
+    if (s_android_dynamic_descriptors) p_push_desc = android_dynamic_descriptors;
+    if (s_android_native_push) {
+        PFN_vkCmdPushDescriptorSetKHR native_push =
+            (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(s_dev, "vkCmdPushDescriptorSetKHR");
+        if (native_push) p_push_desc = native_push;
+        else {
+            s_android_native_push = 0;
+            NFS_LOG_WARN("graphics", "[VKDESC] native function missing; retaining descriptor-set fallback\n");
+        }
+    }
+    NFS_LOG_INFO("graphics", "[VKDESC] requested=%d supported=%d max_push=%u native=%d\n",
+        push_requested, push_supported, push_limit, s_android_native_push);
     p_begin_rendering = android_begin_rendering;
     p_end_rendering = android_end_rendering;
 #else
@@ -2762,10 +3005,16 @@ static int ready(void)
             b[i].descriptorCount = 1;
             b[i].descriptorType = i < 2 || i == 6 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
                                                   : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+#ifdef __ANDROID__
+            if (s_android_dynamic_descriptors && (i < 2 || i == 6))
+                b[i].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+#endif
             b[i].stageFlags = i == 0 || i == 6 ? VK_SHADER_STAGE_VERTEX_BIT
                                                : VK_SHADER_STAGE_FRAGMENT_BIT;
         }
-        #ifndef __ANDROID__
+#ifdef __ANDROID__
+        lci.flags = android_descriptor_layout_flags();
+#else
         lci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
 #endif
         lci.bindingCount = 7;
@@ -2808,6 +3057,15 @@ static int ready(void)
         cai.commandBufferCount = VK_CBS;
         if (vkAllocateCommandBuffers(s_dev, &cai, f->cbs) != VK_SUCCESS)
             return 0;
+        if (s_gpu_profile) {
+            VkQueryPoolCreateInfo qi = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+            qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+            qi.queryCount = s_gpu_profile == 1 ? GPU_QUERY_COUNT : 3;
+            if (vkCreateQueryPool(s_dev, &qi, NULL, &f->gpu_queries) != VK_SUCCESS) {
+                f->gpu_queries = VK_NULL_HANDLE;
+                NFS_LOG_WARN("graphics", "[GPU] timestamp pool unavailable\n");
+            }
+        }
         vkCreateFence(s_dev, &fci, NULL, &f->fence);
         vkCreateSemaphore(s_dev, &sci, NULL, &f->acquired);
 #ifndef __ANDROID__
@@ -3354,6 +3612,7 @@ static int regs_changed(const uint32_t *r)
 static struct {
     int          on;                        /* a draw is held */
     uint32_t     n, count, max;             /* index count, instances so far, room */
+    int          compact_eligible, compact_selected;
     VkDeviceSize cat;                       /* first instance's constants */
     uint32_t     cb_gen;
     uint32_t     prim, vertex_count, index_count;
@@ -3369,6 +3628,19 @@ static struct {
 static int s_inst_on = -1, s_inst_alt;
 static uint32_t s_st_draws, s_st_calls, s_st_inst, s_st_creuse;
 
+static void gpu_count_draw(uint32_t indices, uint32_t instances, int eligible, int selected)
+{
+    if (!s_f->gpu_queries) return;
+    s_f->gpu_draws++;
+    s_f->gpu_indices += (uint64_t)indices * instances;
+    if (s_f->gpu_active_pass < 0) return;
+    unsigned slot = (unsigned)s_f->gpu_active_pass;
+    s_f->gpu_targets[slot].draws++;
+    s_f->gpu_targets[slot].compact_eligible += eligible;
+    s_f->gpu_targets[slot].compact_selected += selected;
+    s_f->gpu_targets[slot].indices += (uint64_t)indices * instances;
+}
+
 static void pend_flush(void)
 {
     if (!s_pend.on)
@@ -3376,6 +3648,7 @@ static void pend_flush(void)
     s_pend.on = 0;
     if (s_pend.cb_gen != s_cb_gen)
         return;                                 /* cannot happen: flushes go first */
+    gpu_count_draw(s_pend.n, s_pend.count, s_pend.compact_eligible, s_pend.compact_selected);
     vkCmdDrawIndexed(s_cb, s_pend.n, s_pend.count, 0, 0, 0);
     s_st_calls++;
 }
@@ -3414,10 +3687,13 @@ static int pend_eligible(const Nv2aRawBatch *b)
     return 1;
 }
 
-static void pend_hold(const Nv2aRawBatch *b, uint32_t n, VkDeviceSize cat, uint32_t max)
+static void pend_hold(const Nv2aRawBatch *b, uint32_t n, VkDeviceSize cat, uint32_t max,
+                      int compact_eligible, int compact_selected)
 {
     uint32_t a;
     s_pend.on = 1;
+    s_pend.compact_eligible = compact_eligible;
+    s_pend.compact_selected = compact_selected;
     s_pend.n = n;
     s_pend.count = 1;
     s_pend.max = max;
@@ -3451,6 +3727,7 @@ static void pend_hold(const Nv2aRawBatch *b, uint32_t n, VkDeviceSize cat, uint3
         if (!s_pend.idx) {
             s_pend.idx_cap = 0;
             s_pend.on = 0;
+            gpu_count_draw(n, 1, compact_eligible, compact_selected);
             vkCmdDrawIndexed(s_cb, n, 1, 0, 0, 0);
             s_st_calls++;
             return;
@@ -3499,6 +3776,7 @@ static void vk_draw_raw_impl(const Nv2aRawBatch *b)
     VkDescriptorBufferInfo ub[3];
     VkWriteDescriptorSet wr[7];
     uint32_t inst_room = 0;
+    int compact_eligible = 0, compact_selected = 0;
     void *map;
     static VkPipeline cur_pipe;
     static uint32_t cur_pipe_gen;
@@ -3581,7 +3859,13 @@ static void vk_draw_raw_impl(const Nv2aRawBatch *b)
 
     /* Submit before this draw uploads/binds vertices. Android's vertex
      * bindings would otherwise be lost if begin_rendering switched buffers. */
-    if (kick_due(s_in_render && s_rt == s && s_rt_depth == d))
+#ifdef __ANDROID__
+    int omit_unused_depth = unused_depth_enabled();
+    VkDepthBuf *kick_depth = draw_depth_attachment(s, d, r, omit_unused_depth);
+#else
+    VkDepthBuf *kick_depth = d;
+#endif
+    if (kick_due(s_in_render && s_rt == s && s_rt_depth == kick_depth))
         kick_submit();
     s_kick_draws++;
 
@@ -3605,9 +3889,24 @@ static void vk_draw_raw_impl(const Nv2aRawBatch *b)
         }
     }
 #ifdef __ANDROID__
+    /* Ring overflow or an early submit may have ended the old pass. Select
+     * again against the actual pass that will receive this draw. PipeKey and
+     * begin_rendering must agree about the presence of depth/stencil. */
+    d = draw_depth_attachment(s, d, r, omit_unused_depth);
+    key.depth = d != NULL;
     if (!upload_vertices(b)) return;
     static const uint32_t offsets[11] = {0x308,0x39C,0x3A0,0x30C,0x35C,0x354,0x32C,0x370,0x374,0x378,0x364};
     key.topo = topo;
+    {
+        VkShaderSpecialization mode = android_shader_specialization();
+        compact_eligible = nv2a_gl_psh_compact_eligible(&p->pkey);
+        key.compact = mode.compact && compact_eligible;
+        key.zero_source = mode.zero_source && zero_source_safe(r[0x304/4], r[0x344/4],
+            r[0x348/4], r[0x350/4], r[0x300/4], r[0x33C/4], p->pkey.shader_program);
+        /* Preserve the existing uniform test unless this draw unconditionally
+         * passes. CLIP_PLANE discards remain independent of this constant. */
+        key.alpha_test = !mode.alpha || (r[0x300 / 4] && r[0x33C / 4] != 0x207);
+    }
     for (i = 0; i < 11; i++) key.state[i] = r[offsets[i] / 4];
     for (i = 0; i < 16; i++) {
         key.strides[i] = android_bindings[i].stride;
@@ -3615,6 +3914,7 @@ static void vk_draw_raw_impl(const Nv2aRawBatch *b)
     }
     pipe = pipe_get(&key);
     if (!pipe) return;
+    compact_selected = key.compact && p->fs_compact != VK_NULL_HANDLE;
 #endif
     begin_rendering(s, d);
     s->dirty = 1;
@@ -3752,8 +4052,9 @@ static void vk_draw_raw_impl(const Nv2aRawBatch *b)
     /* The constants were the ring's last allocation, so a repeat's set
      * lands right behind them (pend_append). */
     if (pend_eligible(b) && inst_room > 1) {
-        pend_hold(b, n, ub[2].offset, inst_room);
+        pend_hold(b, n, ub[2].offset, inst_room, compact_eligible, compact_selected);
     } else {
+        gpu_count_draw(n, 1, compact_eligible, compact_selected);
         vkCmdDrawIndexed(s_cb, n, 1, 0, 0, 0);
         s_st_calls++;
     }
@@ -3827,10 +4128,17 @@ static void vk_clear(const Nv2aSurface *sf, const Nv2aRenderState *rs,
     }
     if (!nca)
         return;
+    if (lazy_clears_enabled() && defer_full_clear(s, d, &rect, nca, ca)) {
+        s->dirty = 1;
+        s->gen++;
+        return;
+    }
     VT("clear %08X %ux%u flags %X rect %d,%d %ux%u depth %p\n", s->va, s->pw, s->ph, flags,
        rect.rect.offset.x, rect.rect.offset.y, rect.rect.extent.width, rect.rect.extent.height, (void *)d);
     begin_rendering(s, d);
     vkCmdClearAttachments(s_cb, nca, ca, 1, &rect);
+    if (s_f->gpu_queries && s_f->gpu_active_pass >= 0)
+        s_f->gpu_targets[s_f->gpu_active_pass].clears++;
     VT("  cleared\n");
     s->dirty = 1;
     s->gen++;
@@ -3868,6 +4176,7 @@ static void dump_surface(VkSurf *s, const char *path)
     VkBufferImageCopy rg;
     void *ptr;
 
+    color_ready(s);
     bci.size = (VkDeviceSize)s->pw * s->ph * 4;
     bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     if (vkCreateBuffer(s_dev, &bci, NULL, &buf) != VK_SUCCESS)
@@ -3921,16 +4230,20 @@ static const char s_pp_vs[] =
 static const char s_pp_fs[] =
     "#version 450\n"
     "layout(set = 0, binding = 0) uniform sampler2D src;\n"
-    "layout(push_constant) uniform P { vec4 rect; vec4 rcp; } pc;\n"
+    "layout(push_constant) uniform P { vec4 rect; vec4 rcp; vec2 extent; } pc;\n"
     "layout(location = 0) out vec4 o;\n"
+    PRESENT_LOGICAL_COORD_GLSL
     "float L(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }\n"
     "float Lat(vec2 uv) { return L(textureLod(src, uv, 0.0).rgb); }\n"
     "#define LO(x, y) L(textureLodOffset(src, uv, 0.0, ivec2(x, y)).rgb)\n"
     "const float Q[8] = float[](1.0, 1.0, 1.0, 1.5, 2.0, 2.0, 4.0, 8.0);\n"
     "void main() {\n"
-    "    vec2 uv = (gl_FragCoord.xy - pc.rect.xy) / pc.rect.zw;\n"
+    "    int flags = int(pc.rcp.w);\n"
+    "    vec2 pos = logical_coord(gl_FragCoord.xy, pc.extent, flags & 3);\n"
+    "    vec2 uv = (pos - pc.rect.xy) / pc.rect.zw;\n"
     "    vec2 r = pc.rcp.xy;\n"
     "    vec4 cM = textureLod(src, uv, 0.0);\n"
+    "    if ((flags & 4) != 0) { o = vec4(cM.rgb, 1.0); return; }\n"
     "    float lM = L(cM.rgb), lD = LO(0, 1), lU = LO(0, -1), lL = LO(-1, 0), lR = LO(1, 0);\n"
     "    float mx = max(lM, max(max(lD, lU), max(lL, lR)));\n"
     "    float mn = min(lM, min(min(lD, lU), min(lL, lR)));\n"
@@ -4016,10 +4329,12 @@ static VkPipeline pp_pipe(VkFormat fmt)
         VkDescriptorSetLayoutBinding b = { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
                                            VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
         VkDescriptorSetLayoutCreateInfo lci = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-        VkPushConstantRange pr = { VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32 };
+        VkPushConstantRange pr = { VK_SHADER_STAGE_FRAGMENT_BIT, 0, 40 };
         VkPipelineLayoutCreateInfo pli = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
         VkSamplerCreateInfo sci = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
-        #ifndef __ANDROID__
+#ifdef __ANDROID__
+        lci.flags = android_descriptor_layout_flags();
+#else
         lci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
 #endif
         lci.bindingCount = 1;
@@ -4062,7 +4377,7 @@ static VkPipeline pp_pipe(VkFormat fmt)
         rci.colorAttachmentCount = 1;
         rci.pColorAttachmentFormats = &fmt;
 #ifdef __ANDROID__
-        ci.renderPass = android_render_pass(fmt, 0, 1);
+        ci.renderPass = android_render_pass(fmt, 0, 1, 1);
 #else
         ci.pNext = &rci;
 #endif
@@ -4099,20 +4414,23 @@ static VkPipeline pp_pipe(VkFormat fmt)
  * rendering; 0 = not recorded (use the blit). */
 static int present_fxaa(VkSurf *s, VkImage dst, VkImageView dview, VkFormat fmt, VkExtent2D ext,
                         int dx, int dy, int dw, int dh, VkImageLayout final,
-                        VkPipelineStageFlags final_stage)
+                        VkPipelineStageFlags final_stage, VkExtent2D logical, uint32_t rotation, int antialias)
 {
     VkPipeline pipe = pp_pipe(fmt);
     VkImageMemoryBarrier b = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
     VkRenderingAttachmentInfo ca = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
     VkRenderingInfo ri = { VK_STRUCTURE_TYPE_RENDERING_INFO };
-    VkViewport vp = { (float)dx, (float)dy, (float)dw, (float)dh, 0.0f, 1.0f };
     VkRect2D sc = { { dx, dy }, { (uint32_t)dw, (uint32_t)dh } };
+    sc = present_physical_rect(logical, sc, rotation);
+    VkViewport vp = { (float)sc.offset.x, (float)sc.offset.y,
+        (float)sc.extent.width, (float)sc.extent.height, 0.0f, 1.0f };
     VkDescriptorImageInfo ii;
     VkWriteDescriptorSet wr = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-    float pc[8];
+    float pc[10];
 
     if (!pipe || !dview)
         return 0;
+    color_ready(s);
     end_rendering();
     b.srcAccessMask = 0;
     b.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
@@ -4134,6 +4452,7 @@ static int present_fxaa(VkSurf *s, VkImage dst, VkImageView dview, VkFormat fmt,
     ri.layerCount = 1;
     ri.colorAttachmentCount = 1;
     ri.pColorAttachments = &ca;
+    if (s_f->gpu_queries) s_f->gpu_passes++;
     p_begin_rendering(s_cb, &ri);
     vkCmdBindPipeline(s_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
     vkCmdSetViewport(s_cb, 0, 1, &vp);
@@ -4148,7 +4467,8 @@ static int present_fxaa(VkSurf *s, VkImage dst, VkImageView dview, VkFormat fmt,
     p_push_desc(s_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, s_pp_layout, 0, 1, &wr);
     pc[0] = (float)dx; pc[1] = (float)dy; pc[2] = (float)dw; pc[3] = (float)dh;
     pc[4] = 1.0f / (float)s->pw; pc[5] = 1.0f / (float)s->ph;
-    pc[6] = s_fxaa_subpix; pc[7] = 0.0f;
+    pc[6] = s_fxaa_subpix; pc[7] = (float)(rotation | (antialias ? 0u : 4u));
+    pc[8] = (float)logical.width; pc[9] = (float)logical.height;
     vkCmdPushConstants(s_cb, s_pp_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, pc);
     vkCmdDraw(s_cb, 3, 1, 0, 0);
     p_end_rendering(s_cb);
@@ -4184,7 +4504,7 @@ static void dump_fxaa(VkSurf *s, const char *path)
         VkExtent2D ext = { t.pw, t.ph };
         if (present_fxaa(s, t.image, t.view, VK_FORMAT_B8G8R8A8_UNORM, ext, 0, 0,
                          (int)t.pw, (int)t.ph, VK_IMAGE_LAYOUT_GENERAL,
-                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT))
+                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, ext, 0, 1))
             dump_surface(&t, path);
     }
 }
@@ -4300,6 +4620,33 @@ static void vk_flip_impl(void)
     end_rendering();
     s_rt = NULL;
     s_rt_depth = NULL;
+#ifdef __ANDROID__
+    if (s && s_drew_any) mark_screen_target(s);
+    /* One completed guest command sequence per nonzero request token.
+     * This frame's logging is excluded from benchmarks. */
+    {
+        static char traced_request[PROP_VALUE_MAX];
+        if (s_frame % 300 == 0) {
+            char property[PROP_VALUE_MAX] = {0};
+            __system_property_get("debug.nfsu.trace_target", property);
+            if (*property && strcmp(property, "0") && strcmp(property, traced_request)) {
+                snprintf(traced_request, sizeof traced_request, "%s", property);
+                NFS_LOG_INFO("graphics", "[PASSSEQ] request=%s frame=%u passes=%u timestamps=%d\n",
+                    property, s_frame, s_f->gpu_pass_count, s_f->gpu_queries != VK_NULL_HANDLE);
+                for (uint32_t i = 0; i < s_f->gpu_pass_count; i++)
+                    NFS_LOG_INFO("graphics", "[PASSSEQ] frame=%u pass=%u target=%08X size=%ux%u"
+                        " clears=%u draws=%llu indices=%llu end=%s depth=%u\n",
+                        s_frame, i, s_f->gpu_targets[i].target,
+                        s_f->gpu_targets[i].width, s_f->gpu_targets[i].height,
+                        s_f->gpu_targets[i].clears,
+                        (unsigned long long)s_f->gpu_targets[i].draws,
+                        (unsigned long long)s_f->gpu_targets[i].indices,
+                        s_f->gpu_targets[i].end_reason ? s_f->gpu_targets[i].end_reason : "unknown",
+                        s_f->gpu_targets[i].depth);
+            }
+        }
+    }
+#endif
     {
         int pct = nv2a_vk_scale_pct;
         double k = pct < 50 ? 0.0 : pct > 400 ? 4.0 : pct / 100.0;
@@ -4311,6 +4658,32 @@ static void vk_flip_impl(void)
             rescale_surfaces(k);
         }
     }
+#ifdef __ANDROID__
+    /* One-shot developer snapshot. Readback deliberately stalls; never use
+     * this frame/window as a performance sample. No guest state is changed. */
+    {
+        static int targets_dumped;
+        if (!targets_dumped && s_frame % 300 == 0) {
+            char property[PROP_VALUE_MAX] = {0};
+            __system_property_get("debug.nfsu.dump_targets", property);
+            if (strcmp(property, "1") == 0) {
+                targets_dumped = 1;
+                for (unsigned i = 0; i < VK_MAX_SURF; i++) {
+                    VkSurf *target = &s_surf[i];
+                    if (!target->image || s_frame - target->used > 1) continue;
+                    char path[160];
+                    snprintf(path, sizeof path, "logs/target-%08X-%ux%u.bmp",
+                        target->va, target->pw, target->ph);
+                    NFS_LOG_INFO("graphics", "[TARGETDUMP] %s guest=%ux%u aa=%ux%u\n",
+                        path, target->w, target->h, target->aa_sx, target->aa_sy);
+                    barrier_all();
+                    dump_surface(target, path);
+                }
+                NFS_LOG_INFO("graphics", "[TARGETDUMP] complete frame=%u\n", s_frame);
+            }
+        }
+    }
+#endif
     if (s && s_drew_any && dump_every && ((s_frame % (uint32_t)dump_every) == 0
                                           || (s_inst_alt && s_frame % (uint32_t)dump_every == 1))) {
         char path[320];
@@ -4322,8 +4695,11 @@ static void vk_flip_impl(void)
             dump_fxaa(s, path);
         }
     }
+    color_ready(s);
     barrier_all();
 
+    if (s_f->gpu_queries)
+        vkCmdWriteTimestamp(s_cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, s_f->gpu_queries, 1);
     VT("flip %u: surface %08X drew %d, acquiring\n", s_frame, s ? s->va : 0, s_drew_any);
 #ifdef __ANDROID__
     if (!s_headless) android_prepare_presentation();
@@ -4361,18 +4737,30 @@ static void vk_flip_impl(void)
                 /* The logical aspect (16:9 for a widescreen title),
                  * letterboxed. Rows are top-first on both sides. */
                 float lw = (float)s->w / (float)s->aa_sx, lh = (float)s->h / (float)s->aa_sy;
-                float ww = (float)s_sc_extent.width, wh = (float)s_sc_extent.height, scale;
+                float ww = (float)s_sc_logical_extent.width, wh = (float)s_sc_logical_extent.height, scale;
                 if (xbox_video_widescreen() && lw < lh * 1.5f)
                     lw = lh * 16.0f / 9.0f;
                 scale = ww / lw < wh / lh ? ww / lw : wh / lh;
                 dw = (int)(lw * scale); dh = (int)(lh * scale);
                 dx = ((int)ww - dw) / 2; dy = ((int)wh - dh) / 2;
             }
-            if (dw > 0 && dh > 0 && fxaa_on()
+            int antialias = fxaa_on();
+            if (dw > 0 && dh > 0 && (antialias || s_sc_rotation)
                 && present_fxaa(s, dst, s_sc_views[idx], s_sc_format, s_sc_extent, dx, dy, dw, dh,
                                 VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                                VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT))
+                                VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, s_sc_logical_extent, s_sc_rotation, antialias))
                 goto presented;
+#ifdef __ANDROID__
+            if (s_sc_rotation && dw > 0 && dh > 0) {
+                /* A missing pipeline/view cannot safely use an unrotated
+                 * transfer blit into a rotated swapchain. Clear this frame
+                 * and rebuild with the legacy path on the next flip. */
+                NFS_LOG_ERROR("graphics", "[VKROT] final draw unavailable; restoring legacy presentation\n");
+                s_android_prerotate_failed = 1;
+                s_android_present = ANDROID_REBUILD_SWAPCHAIN;
+                dw = dh = 0;
+            }
+#endif
             b.srcAccessMask = 0;
             b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
             b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -4402,6 +4790,7 @@ static void vk_flip_impl(void)
                 bl.dstOffsets[1].x = dx + dw;
                 bl.dstOffsets[1].y = dy + dh;
                 bl.dstOffsets[1].z = 1;
+                if (s_f->gpu_queries) s_f->gpu_blits++;
                 vkCmdBlitImage(s_cb, s->image, VK_IMAGE_LAYOUT_GENERAL, dst,
                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bl, VK_FILTER_LINEAR);
             }
@@ -4414,6 +4803,8 @@ static void vk_flip_impl(void)
         presented:;
         }
     }
+    if (s_f->gpu_queries)
+        vkCmdWriteTimestamp(s_cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, s_f->gpu_queries, 2);
     VT("flip %u: submit (image %d)\n", s_frame, have_image);
     vkEndCommandBuffer(s_cb);
     si.commandBufferCount = 1;
@@ -4451,6 +4842,18 @@ static void vk_flip_impl(void)
         pr = vkQueuePresentKHR(s_queue, &pi);
         nfsu_perf_end(NFSU_PERF_VK_PRESENT, perf_present);
 #ifdef __ANDROID__
+        if (pr == VK_SUBOPTIMAL_KHR && s_sc_rotation) {
+            static uint32_t checked;
+            if (s_frame - checked >= 30) {
+                VkSurfaceCapabilitiesKHR caps;
+                checked = s_frame;
+                if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(s_pd, s_surface, &caps) == VK_SUCCESS
+                    && (present_rotation(caps.currentTransform) != s_sc_rotation
+                        || caps.currentExtent.width != s_sc_logical_extent.width
+                        || caps.currentExtent.height != s_sc_logical_extent.height))
+                    s_android_present = ANDROID_REBUILD_SWAPCHAIN;
+            }
+        }
         if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_ERROR_SURFACE_LOST_KHR) {
             NFS_LOG_DEBUG("graphics", "  [VK] " "Android present requires presentation rebuild: %d\n", pr);
             s_android_present = pr == VK_ERROR_SURFACE_LOST_KHR
