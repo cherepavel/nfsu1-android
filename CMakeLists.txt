@@ -13,6 +13,13 @@ option(NFSU2_REGISTER_BLOCK "Experimental grouped native TLS guest registers" OF
 if(NFSU2_REGISTER_BLOCK)
     add_compile_definitions(RECOMP_REGISTER_BLOCK=1)
 endif()
+option(NFSU2_EXECUTOR_TLS_ARG "Experimental executor argument at generated safe points" OFF)
+if(NFSU2_EXECUTOR_TLS_ARG)
+    if(NOT ANDROID OR NOT NFSU2_REGISTER_BLOCK)
+        message(FATAL_ERROR "NFSU2_EXECUTOR_TLS_ARG requires Android and NFSU2_REGISTER_BLOCK")
+    endif()
+    add_compile_definitions(RECOMP_EXECUTOR_TLS_ARG=1)
+endif()
 
 if(ANDROID)
     enable_language(CXX)

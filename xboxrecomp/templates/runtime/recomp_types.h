@@ -279,11 +279,19 @@ static inline uint32_t recomp_atomic_cas32(volatile void *p, uint32_t cmp, uint3
  * hint every turn, a wake for the runtime's sleeping hardware threads every
  * 16, a host yield every 64 -- which also hands the guest lock (kernel_bridge.c)
  * to whichever guest thread, ISR or DPC the loop is waiting for. */
+#ifdef RECOMP_EXECUTOR_TLS_ARG
+/* Resolve the block once in the generated caller, where register access can
+ * reuse its address. The bridge/query receives the owner pointer directly. */
+void recomp_preempt_for_executor(struct XgfExecutor *executor);
+#define RECOMP_PREEMPT_CALL() recomp_preempt_for_executor(g_recomp_registers.native_executor)
+#else
+#define RECOMP_PREEMPT_CALL() recomp_preempt()
+#endif
 #if defined(_MSC_VER)
 #define RECOMP_SPIN_HINT() _mm_pause()
 extern volatile int g_gil_contended;
 void recomp_preempt(void);
-#define RECOMP_PREEMPT() do { if (g_gil_contended) recomp_preempt(); } while (0)
+#define RECOMP_PREEMPT() do { if (g_gil_contended) RECOMP_PREEMPT_CALL(); } while (0)
 #else
 #include <sched.h>
 void recomp_spin_wake(void);        /* runtime: wake the hardware threads */
@@ -293,7 +301,7 @@ void recomp_spin_yield_at(uint32_t pc, uint32_t ax, uint32_t cx, uint32_t dx, ui
  * waiting for the guest lock (kernel_bridge.c). One load when nobody is. */
 extern volatile int g_gil_contended;
 void recomp_preempt(void);
-#define RECOMP_PREEMPT() do { if (__builtin_expect(__atomic_load_n(&g_gil_contended, __ATOMIC_RELAXED), 0)) recomp_preempt(); } while (0)
+#define RECOMP_PREEMPT() do { if (__builtin_expect(__atomic_load_n(&g_gil_contended, __ATOMIC_RELAXED), 0)) RECOMP_PREEMPT_CALL(); } while (0)
 static inline void recomp_spin_hint_at(uint32_t pc, uint32_t ax, uint32_t cx, uint32_t dx, uint32_t si)
 {
     static RECOMP_TLS unsigned turns;

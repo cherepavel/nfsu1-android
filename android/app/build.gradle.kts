@@ -18,6 +18,13 @@ val xbe = providers.gradleProperty("nfsu.xbe")
 // Keep compiler experiments reproducible through the normal Gradle entry point.
 val generatedOptimization = providers.gradleProperty("nfsu.genOpt").orElse("-O2")
 val registerBlock = providers.gradleProperty("nfsu.registerBlock").orElse("false")
+val executorTlsArg = providers.gradleProperty("nfsu.executorTlsArg").orElse("false")
+require(executorTlsArg.get() in listOf("true", "false")) {
+    "nfsu.executorTlsArg must be true or false"
+}
+require(executorTlsArg.get() != "true" || registerBlock.get() == "true") {
+    "nfsu.executorTlsArg=true requires nfsu.registerBlock=true"
+}
 require(registerBlock.get() in listOf("true", "false")) {
     "nfsu.registerBlock must be true or false"
 }
@@ -140,6 +147,7 @@ android {
             cmake {
                 arguments += listOf("-DNFSU2_VULKAN=ON", "-DANDROID_STL=c++_shared",
                     "-DNFSU2_REGISTER_BLOCK=${if (registerBlock.get() == "true") "ON" else "OFF"}",
+                    "-DNFSU2_EXECUTOR_TLS_ARG=${if (executorTlsArg.get() == "true") "ON" else "OFF"}",
                     "-DNFSU2_GEN_DIR=${generatedCode.get().asFile.absolutePath}",
                     "-DNFSU2_GEN_OPT=${generatedOptimization.get()}")
                 targets += listOf("nfsu2_recomp", "SDL2")

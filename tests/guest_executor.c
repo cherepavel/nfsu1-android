@@ -20,6 +20,15 @@ static unsigned value, messages;
 static int trace[16], trace_count;
 static unsigned callbacks_done;
 static uintptr_t native_low, native_high;
+static XgfPreemptStatus checked_preempt_status(void)
+{
+    XgfPreemptStatus status = xgf_preempt_status();
+#ifdef RECOMP_EXECUTOR_TLS_ARG
+    assert(g_recomp_registers.native_executor == xgf_current_executor());
+    assert(xgf_preempt_status_for_executor(g_recomp_registers.native_executor) == status);
+#endif
+    return status;
+}
 static void native_stack_probe(void *argument)
 {
     char marker;
@@ -27,7 +36,7 @@ static void native_stack_probe(void *argument)
     assert(GetCurrentThreadId() == *(DWORD *)argument && xgf_current());
     RecompKernelState *k = &recomp_context_current()->kernel;
     assert(k->native_kernel_frames == 1 && k->busy_depth == 1 && k->gil_depth == 1 && k->guest_cs_depth == 1);
-    assert(xgf_preempt_status() == XGF_PREEMPT_STAY);
+    assert(checked_preempt_status() == XGF_PREEMPT_STAY);
     assert(!xgf_yield() && !xgf_prepare_wait(xgf_current()));
     assert(!xgf_native_call(native_stack_probe, argument));
     errno = EIO;
@@ -223,16 +232,16 @@ static DWORD WINAPI preempt_cache_probe(void *unused)
     assert(xgf_should_preempt());
     RecompKernelState *k = &recomp_context_current()->kernel;
     assert(k->gil_depth == 0);
-    assert(xgf_preempt_status() == XGF_PREEMPT_STAY);
+    assert(checked_preempt_status() == XGF_PREEMPT_STAY);
     k->gil_depth = 1;
-    assert(xgf_preempt_status() == XGF_PREEMPT_YIELD);
+    assert(checked_preempt_status() == XGF_PREEMPT_YIELD);
     k->gil_nopreempt = 1;
-    assert(xgf_preempt_status() == XGF_PREEMPT_STAY);
+    assert(checked_preempt_status() == XGF_PREEMPT_STAY);
     k->gil_nopreempt = 0;
     k->dispatch_held = 1;
-    assert(xgf_preempt_status() == XGF_PREEMPT_STAY);
+    assert(checked_preempt_status() == XGF_PREEMPT_STAY);
     k->dispatch_held = 0;
-    assert(xgf_preempt_status() == XGF_PREEMPT_YIELD);
+    assert(checked_preempt_status() == XGF_PREEMPT_YIELD);
     k->gil_depth = 0;
     assert(SuspendThread(h) == 0);
     assert(!xgf_should_preempt());
@@ -262,7 +271,7 @@ static DWORD WINAPI preempt_cache_probe(void *unused)
 int main(void)
 {
     alarm(15);
-    assert(xgf_preempt_status() == XGF_PREEMPT_NATIVE);
+    assert(checked_preempt_status() == XGF_PREEMPT_NATIVE);
     owner = pthread_self(); native_tid = GetCurrentThreadId();
     pthread_attr_t attr;
     void *stack; size_t stack_size;

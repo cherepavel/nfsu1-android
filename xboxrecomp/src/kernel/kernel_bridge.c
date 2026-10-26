@@ -1026,16 +1026,8 @@ static int gil_main_quantum_pending(uint64_t now)
 }
 #endif
 
-void recomp_preempt(void)
+static void recomp_preempt_native(void)
 {
-#ifdef NFSU_GUEST_EXECUTOR
-    XgfPreemptStatus status = xgf_preempt_status();
-    if (status != XGF_PREEMPT_NATIVE) {
-        if (status == XGF_PREEMPT_YIELD)
-            gil_yield_measured(NFSU_PERF_PREEMPT_WAIT, NFSU_PERF_PREEMPT_TOTAL);
-        return;
-    }
-#endif
     if (t_gil_depth <= 0 || t_gil_nopreempt || xbox_thread_holds_dispatch())
         return;
 #if defined(__ANDROID__) || defined(NFSU_GUEST_SCHEDULER_TEST)
@@ -1051,6 +1043,34 @@ void recomp_preempt(void)
 #endif
     gil_yield_measured(NFSU_PERF_PREEMPT_WAIT, NFSU_PERF_PREEMPT_TOTAL);
 }
+
+#ifdef NFSU_GUEST_EXECUTOR
+static void recomp_preempt_status(XgfPreemptStatus status)
+{
+    if (status == XGF_PREEMPT_NATIVE) recomp_preempt_native();
+    else if (status == XGF_PREEMPT_YIELD)
+        gil_yield_measured(NFSU_PERF_PREEMPT_WAIT, NFSU_PERF_PREEMPT_TOTAL);
+}
+#endif
+
+void recomp_preempt(void)
+{
+#ifdef NFSU_GUEST_EXECUTOR
+    recomp_preempt_status(xgf_preempt_status());
+#else
+    recomp_preempt_native();
+#endif
+}
+
+#ifdef RECOMP_EXECUTOR_TLS_ARG
+#ifndef NFSU_GUEST_EXECUTOR
+#error RECOMP_EXECUTOR_TLS_ARG requires the guest executor bridge
+#endif
+void recomp_preempt_for_executor(XgfExecutor *executor)
+{
+    recomp_preempt_status(xgf_preempt_status_for_executor(executor));
+}
+#endif
 
 #define GUEST_CALL(f) do { xbox_gil_enter(); (f)(); xbox_gil_leave(); } while (0)
 /* An interrupt or DPC routine: guest code under the lock, never pre-empted. */

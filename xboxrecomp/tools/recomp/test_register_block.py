@@ -16,6 +16,7 @@ class RegisterBlockTest(unittest.TestCase):
         runtime = Path(__file__).resolve().parents[2] / "templates/runtime"
         body = _scope_register_block_aliases([
             "static void localized(void) {",
+            "  RECOMP_PREEMPT();",
             "  uint32_t g_eax = recomp_leaf_ld_eax();",
             "  uint32_t g_esp = recomp_leaf_ld_esp();",
             "  RecompMmx g_mm0 = recomp_leaf_ld_mm0();",
@@ -35,6 +36,15 @@ class RegisterBlockTest(unittest.TestCase):
 #include <assert.h>
 #define RECOMP_GENERATED_CODE
 #include "recomp_types.h"
+volatile int g_gil_contended;
+static int preempt_calls;
+void recomp_preempt(void) { preempt_calls++; }
+#ifdef RECOMP_EXECUTOR_TLS_ARG
+void recomp_preempt_for_executor(struct XgfExecutor *executor) {
+    assert(executor == g_recomp_registers.native_executor);
+    preempt_calls++;
+}
+#endif
 #ifdef RECOMP_REGISTER_BLOCK
 RECOMP_TLS RecompRegisterBlock g_recomp_registers;
 #else
@@ -49,17 +59,26 @@ RECOMP_TLS int g_fp_top;
 static void next(void) { g_eax += 5; g_mm0.q += 1; }
 int main(void) {
     g_eax = 7; g_esp = 100; g_mm0.q = 1; g_fp_top = 3;
+    g_gil_contended = 1;
+#ifdef RECOMP_EXECUTOR_TLS_ARG
+    g_recomp_registers.native_executor = (struct XgfExecutor *)&preempt_calls;
+#endif
     localized(); next();
+    assert(preempt_calls == 1);
     assert(g_eax == 15 && g_esp == 104);
     assert(g_mm0.q == ((1 ^ 0x1234) + 1) && g_xmm2.q[1] == 99);
     assert(g_fp_stack[3] == 42.0 && g_fp_top == 4);
+    g_gil_contended = 0;
+    RECOMP_PREEMPT();
+    assert(preempt_calls == 1);
     return 0;
 }
 '''
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp)
             (path / "probe.c").write_text(source)
-            for flags in ([], ["-DRECOMP_REGISTER_BLOCK=1"]):
+            for flags in ([], ["-DRECOMP_REGISTER_BLOCK=1"],
+                          ["-DRECOMP_REGISTER_BLOCK=1", "-DRECOMP_EXECUTOR_TLS_ARG=1"]):
                 with self.subTest(flags=flags):
                     result = subprocess.run([cc, "-std=c11", "-O2", "-I", str(runtime),
                                     *flags, str(path / "probe.c"), "-lm",

@@ -2,6 +2,10 @@
 #define RECOMP_REGISTERS_H
 #include <stdint.h>
 
+#if defined(RECOMP_EXECUTOR_TLS_ARG) && !defined(RECOMP_REGISTER_BLOCK)
+#error RECOMP_EXECUTOR_TLS_ARG requires RECOMP_REGISTER_BLOCK
+#endif
+
 /* Shared by generated code and the runtime. RECOMP_TLS is supplied by the
  * including header. Keep the optional block native-thread-local: fibers still
  * save and restore architectural values at a context switch. */
@@ -57,6 +61,9 @@ typedef struct RecompRegisterBlock {
     RecompXmm r_xmm6;
     RecompXmm r_xmm7;
     double r_fp_stack[8];
+    /* Native ownership, not architectural guest state. Context save/load must
+     * never copy this field. Only guest_fiber.c publishes/clears it. */
+    struct XgfExecutor *native_executor;
 } RecompRegisterBlock;
 extern RECOMP_TLS RecompRegisterBlock g_recomp_registers;
 #define g_eax (g_recomp_registers.r_eax)

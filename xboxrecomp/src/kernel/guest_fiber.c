@@ -73,7 +73,11 @@ struct XgfFiber {
     int detached;
     XgfFiber *next;
 };
+#ifdef RECOMP_EXECUTOR_TLS_ARG
+#define running (g_recomp_registers.native_executor)
+#else
 static RECOMP_TLS XgfExecutor *running;
+#endif
 static RECOMP_TLS unsigned owner_anchor;
 static uintptr_t owner_id(void) { return (uintptr_t)&owner_anchor; }
 static uint64_t monotonic_ms(void);
@@ -464,19 +468,32 @@ int xgf_should_preempt(void)
     return self && !running->on_native_callback && fiber_should_preempt(self);
 }
 
-XgfPreemptStatus xgf_preempt_status(void)
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((always_inline))
+#endif
+static inline XgfPreemptStatus fiber_preempt_status(XgfExecutor *e)
 {
-    XgfExecutor *e = running;
     if (!e || !e->active) return XGF_PREEMPT_NATIVE;
     XgfFiber *self = e->active;
     /* This is the active guest context even during a native-stack callback.
-     * Read it directly: generated safe points need only one out-of-line call,
-     * rather than reloading TLS through the bridge and dispatch helpers. */
+     * Read it directly instead of resolving current-context TLS or asking
+     * separate bridge/dispatch helpers for each guard. */
     const RecompKernelState *k = &self->context.kernel;
     if (e->on_native_callback || k->gil_depth <= 0 || k->gil_nopreempt || k->dispatch_held)
         return XGF_PREEMPT_STAY;
     return fiber_should_preempt(self) ? XGF_PREEMPT_YIELD : XGF_PREEMPT_STAY;
 }
+
+XgfPreemptStatus xgf_preempt_status(void)
+{
+    return fiber_preempt_status(running);
+}
+#ifdef RECOMP_EXECUTOR_TLS_ARG
+XgfPreemptStatus xgf_preempt_status_for_executor(XgfExecutor *e)
+{
+    return fiber_preempt_status(e);
+}
+#endif
 
 XgfRunResult xgf_executor_run(XgfExecutor *e, uint32_t budget_ms, XgfPoll poll)
 {
