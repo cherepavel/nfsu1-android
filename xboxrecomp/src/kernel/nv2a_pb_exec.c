@@ -38,6 +38,7 @@
 #include "../d3d/d3d8_swizzle.h"
 #include "../d3d/d3d8_dxt.h"
 #include "nv2a_backend.h"
+#include "nv2a_indices.h"
 #ifdef __ANDROID__
 #include "nv2a_fence_wait.h"
 static Nv2aFenceWait s_fence_wait = NV2A_FENCE_WAIT_INITIALIZER;
@@ -4561,10 +4562,8 @@ uint32_t nv2a_pb_exec_run(uint32_t subch, uint32_t method, int noninc,
             s_reg_dirty[w >> 4] = 1;
         }
         if (s_gpu.prim)
-            for (i = 0; i < count && s_gpu.idx_count + 2 <= NV_MAX_INDICES; i++) {
-                s_gpu.idx[s_gpu.idx_count++] = (uint16_t)(p[i] & 0xFFFF);
-                s_gpu.idx[s_gpu.idx_count++] = (uint16_t)(p[i] >> 16);
-            }
+            s_gpu.idx_count = nv2a_append_indices16(s_gpu.idx, s_gpu.idx_count,
+                                                   NV_MAX_INDICES, p, count);
         return count;
     }
     if (!noninc && method >= NV097_SET_TRANSFORM_CONSTANT

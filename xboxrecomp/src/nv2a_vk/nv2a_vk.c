@@ -2192,8 +2192,9 @@ static void pipe_rec_append(const PipeKey *k)
 #ifdef __ANDROID__
 static VkCompareOp cmp_op(uint32_t v, uint32_t dflt);
 static VkStencilOp stencil_op(uint32_t v);
-static VkVertexInputBindingDescription android_bindings[16];
-static VkVertexInputAttributeDescription android_attributes[16];
+/* Android bakes vertex formats/strides into PipeKey, not dynamic state. */
+static uint32_t android_vertex_strides[16];
+static VkFormat android_vertex_formats[16];
 #endif
 static VkPipeline pipe_get(const PipeKey *k)
 {
@@ -3424,8 +3425,10 @@ static int upload_vertices(const Nv2aRawBatch *b)
     VkDeviceSize bytes = 0, pack_at, const_at, at;
     VkFormat fmt[NV2A_RAW_ATTRS];
     uint8_t *dst;
+#ifndef __ANDROID__
     VkVertexInputBindingDescription2EXT bind[NV2A_RAW_ATTRS];
     VkVertexInputAttributeDescription2EXT attr[NV2A_RAW_ATTRS];
+#endif
     VkBuffer bufs[NV2A_RAW_ATTRS];
     VkDeviceSize offs[NV2A_RAW_ATTRS];
     void *map;
@@ -3475,6 +3478,9 @@ static int upload_vertices(const Nv2aRawBatch *b)
     memcpy(dst + const_at, b->attr_const, NV2A_RAW_ATTRS * 16);
 
     for (a = 0; a < NV2A_RAW_ATTRS; a++) {
+        uint32_t stride;
+        VkFormat format;
+#ifndef __ANDROID__
         memset(&bind[a], 0, sizeof bind[a]);
         memset(&attr[a], 0, sizeof attr[a]);
         bind[a].sType = VK_STRUCTURE_TYPE_VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT;
@@ -3484,23 +3490,32 @@ static int upload_vertices(const Nv2aRawBatch *b)
         attr[a].sType = VK_STRUCTURE_TYPE_VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT;
         attr[a].location = a;
         attr[a].binding = a;
+#endif
         bufs[a] = s_f->ring;
         if (direct & (1u << a)) {
-            bind[a].stride = b->direct[a].stride;
-            attr[a].format = fmt[a];
+            stride = b->direct[a].stride;
+            format = fmt[a];
             offs[a] = at + run[of_run[a]].at + (VkDeviceSize)(b->direct[a].ptr - run[of_run[a]].lo);
         } else if (conv & (1u << a)) {
             for (i = 0; i < np && slot[i] != a; i++) { }
-            bind[a].stride = np * 16;
-            attr[a].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+            stride = np * 16;
+            format = VK_FORMAT_R32G32B32A32_SFLOAT;
             offs[a] = at + pack_at + i * 16;
         } else {
             /* Absent: the title's SET_VERTEX_DATA* value, stride 0. */
-            bind[a].stride = 0;
-            attr[a].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+            stride = 0;
+            format = VK_FORMAT_R32G32B32A32_SFLOAT;
             offs[a] = at + const_at + a * 16;
         }
+#ifdef __ANDROID__
+        android_vertex_strides[a] = stride;
+        android_vertex_formats[a] = format;
+#else
+        bind[a].stride = stride;
+        attr[a].format = format;
+#endif
     }
+#ifndef __ANDROID__
     {
         /* Vertex input is dynamic state: re-send it only when it changed
          * (or the command buffer is new) -- consecutive draws of a mesh type
@@ -3510,25 +3525,25 @@ static int upload_vertices(const Nv2aRawBatch *b)
         static uint32_t last_gen;
         if (last_gen != s_cb_gen || memcmp(bind, last_bind, sizeof bind)
             || memcmp(attr, last_attr, sizeof attr)) {
-#ifdef __ANDROID__
-            for (a = 0; a < NV2A_RAW_ATTRS; a++) {
-                android_bindings[a] = (VkVertexInputBindingDescription){a, bind[a].stride, VK_VERTEX_INPUT_RATE_VERTEX};
-                android_attributes[a] = (VkVertexInputAttributeDescription){a, a, attr[a].format, 0};
-            }
-#else
             p_vertex_input(s_cb, NV2A_RAW_ATTRS, bind, NV2A_RAW_ATTRS, attr);
-#endif
             memcpy(last_bind, bind, sizeof bind);
             memcpy(last_attr, attr, sizeof attr);
             last_gen = s_cb_gen;
         }
     }
+#endif
+#ifdef __ANDROID__
+    /* Mali accepts all bindings in one call. Offsets still change every draw,
+     * so this is batching two writes, not caching vertex buffer contents. */
+    vkCmdBindVertexBuffers(s_cb, 0, NV2A_RAW_ATTRS, bufs, offs);
+#else
     /* Eight at a time: Mesa's common entry point copies the arrays through
      * STACK_ARRAY, which mallocs above 8 elements (~3.6% of the executor
      * on the console in malloc/free). */
     vkCmdBindVertexBuffers(s_cb, 0, NV2A_RAW_ATTRS / 2, bufs, offs);
     vkCmdBindVertexBuffers(s_cb, NV2A_RAW_ATTRS / 2, NV2A_RAW_ATTRS - NV2A_RAW_ATTRS / 2,
                            bufs + NV2A_RAW_ATTRS / 2, offs + NV2A_RAW_ATTRS / 2);
+#endif
     return 1;
 }
 
@@ -3909,8 +3924,8 @@ static void vk_draw_raw_impl(const Nv2aRawBatch *b)
     }
     for (i = 0; i < 11; i++) key.state[i] = r[offsets[i] / 4];
     for (i = 0; i < 16; i++) {
-        key.strides[i] = android_bindings[i].stride;
-        key.formats[i] = android_attributes[i].format;
+        key.strides[i] = android_vertex_strides[i];
+        key.formats[i] = android_vertex_formats[i];
     }
     pipe = pipe_get(&key);
     if (!pipe) return;
