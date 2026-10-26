@@ -123,3 +123,94 @@ The matching unstripped library was preserved as
 process markers and normalized results are in `dynamic-desc-*`, including
 `dynamic-desc-abab-summary.json`. The investigation now follows the separate
 [presentation/rotation composition path](vulkan-presentation-prerotation.md).
+
+## Mali-G615 race and measured hash overhead, 26 October 2026
+
+Same installed vertex-setup APK, build ID
+`e150b0e66d6108a71ef6a179f2a7007dcf006920`. Startup confirmed dynamic=1,
+limit=32, native_push=0. PID 4059 / renderer 25211. User opened a race;
+a screenshot confirms racing output. The 10:56:14–10:56:45 MSK capture
+(cpu-clock, 1000 Hz, DWARF) has 23,861 samples, lost=0.
+
+The three complete 300-frame cache summaries inside this recording show
+663386/150764, 535819/132514 and 431681/112753 hits/misses: approximately
+80.4% combined hits. Cache reuse is real. Driver allocation/update/bind
+subtrees shrink from about 8.80% of renderer samples in the preceding
+uncached race to 0.78%/1.70%/1.29% (3.77% combined). But the complete
+`android_dynamic_descriptors` path costs **10.50%**, versus **9.47%** for
+`android_push_descriptors` previously. Scenes/clocks differ; this is not a
+controlled speedup/regression measurement. No net descriptor win is established.
+
+DWARF attribution of self samples reveals a concrete application-side cost:
+824 samples at the bytewise hash loop, plus nearby samples in the same loop
+and probing (170 at the probe line). This is evidence for changing the hash,
+unlike speculative tuning based only on reduced allocation counts.
+
+The hash now processes 32-bit words via memcpy, avoiding alignment and aliasing
+assumptions. Canonical zero initialization is retained; a compile-time size
+assert prevents a tail overread after future key changes. High bits are mixed
+before the table mask to handle aligned buffer/view identities. The table
+still checks full-key equality and linearly probes collisions. No resource
+identity, offset, range, reset or lifetime rule changes.
+
+Validation after this change:
+
+- Existing host ASan/UBSan regression passes: effective addresses/ranges,
+  resource identity, reversed write order, separate frames, reset, collisions
+  and full-cache behavior.
+- Production helper GPU test on Mali: 1024 offset triples / 4096 uint components,
+  zero mismatches against ordinary sets and CPU; 1021 hits / 3 misses.
+- Isolated on-device cache-lookup benchmark, 512 synthetic canonical keys,
+  one million successful lookups per pass, four alternating pairs. Bytewise:
+  572.731/572.939/572.523/572.465 ms thread CPU. Word hash:
+  149.060/148.656/148.569/148.654 ms. All checksums 256499232.
+  This includes probing/comparison but no Vulkan calls; different keys and
+  table occupancy can change the result. It is not an FPS measurement.
+- `./gradlew assembleDebug lintDebug`: BUILD SUCCESSFUL; diff check passes.
+
+Candidate APK SHA256:
+`a0d813eac6ed1e6bd381f413a0070473e242e6f655014b0375d104648940d959`.
+It is built at the usual debug APK path and has not been installed. The old
+cache experiment was disabled with dynamic_desc=0 and the installed app
+restarted after capture. To test the new APK, install it, set
+`debug.nfsu.dynamic_desc=1`, restart and open the same race. Repeat/reverse
+against 0 before enabling by default. Neither the current profile nor the
+hash microbenchmark establishes a whole-renderer or FPS improvement.
+
+Raw data and benchmark source/output are local ignored files under
+`performance-results/2026-10-26/mali-descriptors/`.
+
+## Word-hash installed off/on comparison
+
+26 October, same APK `0661e800fcd1125ab6537a6c6780d6da1386260d`:
+control PID 21887 / TID 29264, 11:05:17–11:05:38 MSK; cached PID 29416 /
+TID 11914, 11:07:17–11:07:38. Both request 20 seconds of cpu-clock at 1000 Hz.
+Control 18,334 samples, cached 13,530 samples, both lost=0. Cached running
+samples end roughly 18 seconds after the first; use actual sampled range for
+window selection, not the nominal requested duration. Screenshot confirms race.
+
+Complete descriptor path inclusive share: **9.30% uncached / 8.07% cached**.
+This is 1.23 percentage points less, about 13.2% relative to descriptor share.
+The word-hash cached share is also below the earlier byte-hash cached 10.50%,
+but those recordings have different scenes and cannot establish exact savings.
+Allocation/update/bind driver shares in the word-hash run are about
+0.87%/1.54%/1.30%. Resource correctness tests remain as documented above.
+
+Three complete PERF5 windows within each sampled range:
+
+| Metric | Off | On |
+|---|---:|---:|
+| Window sum, s | 15.0105 | 15.0074 |
+| Renderer CPU, s | 13.4773 | 11.6870 |
+| Input draws | 1522970 | 1315232 |
+| Flips | 668 | 487 |
+| Flips/s | 44.50 | 32.45 |
+| Draws/flip | 2280 | 2701 |
+| Renderer CPU/input draw, us | 8.85 | 8.89 |
+
+The workloads differ materially. Whole-renderer CPU/draw is essentially
+unchanged, and the lower observed flips/s must not be attributed to the cache
+from this pair. No overall FPS or CPU improvement is established. The cache
+remains opt-in; no production default was changed. Current phone process
+retains dynamic_desc=1 for the experiment; it was not interrupted again after
+capture. Raw captures are `mali-descriptors/word-{off,on}/` locally.

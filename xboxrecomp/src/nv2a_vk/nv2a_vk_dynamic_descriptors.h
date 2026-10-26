@@ -55,9 +55,21 @@ static int android_descriptor_key(const VkWriteDescriptorSet *writes,
 static uint32_t android_descriptor_slot(const AndroidDescriptorCache *cache,
     const AndroidDescriptorKey *key)
 {
+    _Static_assert(sizeof *key % sizeof(uint32_t) == 0, "descriptor key word size");
     const unsigned char *bytes = (const unsigned char *)key;
     uint32_t hash = 2166136261u;
-    for (size_t i = 0; i < sizeof *key; i++) hash = (hash ^ bytes[i]) * 16777619u;
+    /* Keys are canonical, including zeroed padding. Hash words rather than
+     * a bytewise dependency chain; memcpy avoids alignment/aliasing assumptions.
+     * Fold high bits before masking: handles/ranges often have aligned low bits.
+     * Full key comparison below remains authoritative on hash collisions. */
+    for (size_t i = 0; i < sizeof *key; i += sizeof(uint32_t)) {
+        uint32_t word;
+        memcpy(&word, bytes + i, sizeof word);
+        hash = (hash ^ word) * 16777619u;
+    }
+    hash ^= hash >> 16;
+    hash *= 0x85ebca6bu;
+    hash ^= hash >> 13;
     uint32_t slot = hash & (ANDROID_DESCRIPTOR_CACHE_SLOTS - 1u);
     while (cache->slots[slot]
         && memcmp(&cache->entries[cache->slots[slot] - 1].key, key, sizeof *key))
