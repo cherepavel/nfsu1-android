@@ -1,16 +1,9 @@
-/* Architectural snapshots preserve the generated register ABI: normal lifted
- * execution still uses the existing TLS globals, with no per-register lookup. */
+/* Architectural snapshots preserve generated register semantics with either
+ * separate TLS symbols or the experimental native-thread-local block. */
 #include "recomp_context.h"
 #include <string.h>
 #include <errno.h>
 
-extern RECOMP_TLS uint32_t g_eax, g_ecx, g_edx, g_esp, g_ebx, g_esi, g_edi, g_ebp;
-extern RECOMP_TLS uint32_t g_seh_ebp;
-extern RECOMP_TLS int g_df, g_fp_top, g_fp_cmp;
-extern RECOMP_TLS uint16_t g_fp_control_word, g_fp_cc;
-extern RECOMP_TLS double g_fp_stack[8];
-extern RECOMP_TLS RecompMmx g_mm0, g_mm1, g_mm2, g_mm3, g_mm4, g_mm5, g_mm6, g_mm7;
-extern RECOMP_TLS RecompXmm g_xmm0, g_xmm1, g_xmm2, g_xmm3, g_xmm4, g_xmm5, g_xmm6, g_xmm7;
 extern ptrdiff_t g_xbox_mem_offset;
 RECOMP_TLS RecompContext g_recomp_default_context = {.kernel = {.dispatch_slot = -1}};
 RECOMP_TLS RecompContext *g_recomp_current_context;

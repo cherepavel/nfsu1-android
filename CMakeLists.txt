@@ -9,6 +9,11 @@ cmake_minimum_required(VERSION 3.20)
 
 project(nfsu2_recomp C)
 
+option(NFSU2_REGISTER_BLOCK "Experimental grouped native TLS guest registers" OFF)
+if(NFSU2_REGISTER_BLOCK)
+    add_compile_definitions(RECOMP_REGISTER_BLOCK=1)
+endif()
+
 if(ANDROID)
     enable_language(CXX)
     add_compile_definitions(NFSU_USE_ZLOG=1)
@@ -74,6 +79,7 @@ set(GAME_SOURCES
     src/main.c
     src/recomp_manual.c
     src/movie_yuv.c
+    src/culling_native.c
     src/matrix_native.c
     src/d3d_fence_wait.c
     src/switch_nx.c
@@ -162,7 +168,7 @@ else()
     set_source_files_properties(${RECOMP_GEN_SOURCES} PROPERTIES
         COMPILE_OPTIONS "${NFSU2_GEN_FLAGS}")
     set_source_files_properties(src/movie_yuv.c PROPERTIES COMPILE_OPTIONS "-O2")
-    set_source_files_properties(src/matrix_native.c PROPERTIES
+    set_source_files_properties(src/culling_native.c src/matrix_native.c PROPERTIES
         COMPILE_OPTIONS "-O2;-ffp-contract=off;-fno-strict-aliasing")
     set_source_files_properties(src/d3d_fence_wait.c PROPERTIES COMPILE_OPTIONS "-O2")
     target_link_libraries(${PROJECT_NAME} PRIVATE m)

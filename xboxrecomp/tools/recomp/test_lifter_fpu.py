@@ -105,16 +105,20 @@ class FpuLifterTest(unittest.TestCase):
         runtime_types = (
             root / "templates" / "runtime" / "recomp_types.h"
         ).read_text()
+        registers = (
+            root / "templates" / "runtime" / "recomp_registers.h"
+        ).read_text()
         main = (
             root / "templates" / "new-game" / "src" / "main.c"
         ).read_text()
 
-        self.assertIn("extern RECOMP_TLS double g_fp_stack[8];", runtime_types)
-        self.assertIn("extern RECOMP_TLS int g_fp_top;", runtime_types)
+        self.assertIn('#include "recomp_registers.h"', runtime_types)
+        self.assertIn("extern RECOMP_TLS double g_fp_stack[8];", registers)
+        self.assertIn("extern RECOMP_TLS int g_fp_top;", registers)
         self.assertIn("#define SMEM64(addr)", runtime_types)
         self.assertIn("extern RECOMP_TLS double g_fp_stack[8];", main)
         self.assertIn("extern RECOMP_TLS int g_fp_top;", main)
-        self.assertIn("extern RECOMP_TLS uint16_t g_fp_control_word;", runtime_types)
+        self.assertIn("extern RECOMP_TLS uint16_t g_fp_control_word;", registers)
         self.assertIn("#define RECOMP_PARITY8(x)", runtime_types)
         self.assertIn("extern RECOMP_TLS uint16_t g_fp_control_word;", main)
 

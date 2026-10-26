@@ -15,8 +15,12 @@
 #undef edi
 
 ptrdiff_t g_xbox_mem_offset;
+#ifdef RECOMP_REGISTER_BLOCK
+RECOMP_TLS RecompRegisterBlock g_recomp_registers;
+#else
 RECOMP_TLS uint32_t g_eax, g_ecx, g_edx, g_esp, g_ebx, g_esi, g_edi;
 RECOMP_TLS RecompXmm g_xmm0, g_xmm1, g_xmm2, g_xmm3, g_xmm4, g_xmm5, g_xmm6, g_xmm7;
+#endif
 volatile int g_gil_contended;
 void recomp_preempt(void) { abort(); }
 void matrix_reference(void);

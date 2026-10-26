@@ -32,6 +32,14 @@
 #define RECOMP_GENERATED_CODE
 #include "recomp_funcs.h"
 
+/* Opt-in native bounds/frustum test; retain generated body as fallback. */
+extern void sub_00018C30_gen(void);
+extern int nfsu_culling_native(void);
+void sub_00018C30(void)
+{
+    if (!nfsu_culling_native()) sub_00018C30_gen();
+}
+
 /* Packed Xbox matrix multiply -> ARM64 NEON, preserving its guest ABI. */
 extern void sub_00169F4A_gen(void);
 extern int nfsu_matrix_native(void);

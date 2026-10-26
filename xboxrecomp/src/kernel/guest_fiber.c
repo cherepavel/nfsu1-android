@@ -418,35 +418,42 @@ static void import_submissions(XgfExecutor *e)
     }
 }
 
-static int fiber_should_preempt(XgfFiber *self)
+/* Keep list/mutex work out of the cached safe-point path. The generation
+ * snapshot is still taken before refresh, exactly as before: a concurrent
+ * publication forces another refresh at the next safe point. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline, cold))
+#endif
+static void fiber_refresh_preempt(XgfFiber *self, uint64_t generation)
+{
+    XgfExecutor *e = self->executor;
+    pthread_mutex_lock(&e->wake_lock);
+    int higher = e->submissions != NULL;
+    pthread_mutex_unlock(&e->wake_lock);
+    int equal = 0, priority = xgf_priority(self);
+    for (XgfFiber *f = e->list; f; f = f->next) {
+        if (f == self || __atomic_load_n(&f->suspended, __ATOMIC_ACQUIRE)) continue;
+        XgfState state = xgf_state(f);
+        if (state != XGF_NEW && state != XGF_SUSPENDED) continue;
+        int other_priority = xgf_priority(f);
+        if (other_priority > priority) higher = 1;
+        if (other_priority == priority) equal = 1;
+    }
+    self->preempt_higher = higher;
+    self->preempt_equal = equal;
+    self->preempt_generation = generation;
+    self->preempt_valid = 1;
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((always_inline))
+#endif
+static inline int fiber_should_preempt(XgfFiber *self)
 {
     if (__atomic_load_n(&self->suspended, __ATOMIC_ACQUIRE)) return 1;
-    XgfExecutor *e = self->executor;
-    /* Only the owner changes the list. Native notifications, priority changes
-     * and suspend/resume publish a generation after updating their metadata.
-     * Cache the competitor classification until that generation changes; a
-     * quiet safe point needs neither a mutex/list walk nor a clock read when
-     * there is no equal-priority competitor. Never clear a native notification.
-     */
-    uint64_t generation = __atomic_load_n(&e->ready_generation, __ATOMIC_ACQUIRE);
-    if (!self->preempt_valid || self->preempt_generation != generation) {
-        pthread_mutex_lock(&e->wake_lock);
-        int higher = e->submissions != NULL;
-        pthread_mutex_unlock(&e->wake_lock);
-        int equal = 0, priority = xgf_priority(self);
-        for (XgfFiber *f = e->list; f; f = f->next) {
-            if (f == self || __atomic_load_n(&f->suspended, __ATOMIC_ACQUIRE)) continue;
-            XgfState state = xgf_state(f);
-            if (state != XGF_NEW && state != XGF_SUSPENDED) continue;
-            int other_priority = xgf_priority(f);
-            if (other_priority > priority) higher = 1;
-            if (other_priority == priority) equal = 1;
-        }
-        self->preempt_higher = higher;
-        self->preempt_equal = equal;
-        self->preempt_generation = generation;
-        self->preempt_valid = 1;
-    }
+    uint64_t generation = __atomic_load_n(&self->executor->ready_generation, __ATOMIC_ACQUIRE);
+    if (!self->preempt_valid || self->preempt_generation != generation)
+        fiber_refresh_preempt(self, generation);
     return self->preempt_higher ||
         (self->preempt_equal && monotonic_ms() > self->slice_start);
 }

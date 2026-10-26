@@ -200,6 +200,30 @@ def _localize_leaf_registers(lines, instructions, start, end):
     return out
 
 
+def _scope_register_block_aliases(lines):
+    """Preserve locals shadowing g_* when block builds make g_* macros.
+
+    Helpers defined in recomp_types.h already bind to the real TLS block.
+    Only localized names lose their aliases, for this function's body; other
+    registers and subsequent functions must continue to address TLS.
+    """
+    import re
+    names = sorted(set(re.findall(
+        r"\b(?:uint32_t|RecompMmx|int|double\s*\*\s*const)\s+"
+        r"(g_(?:e[abcd]x|e[sd]i|e[bs]p|mm[0-7]|fp_stack|fp_top))\s*=",
+        "\n".join(lines))))
+    if not names:
+        return lines
+    before = ["#ifdef RECOMP_REGISTER_BLOCK"]
+    before.extend(f"#undef {name}" for name in names)
+    before.append("#endif")
+    after = ["#ifdef RECOMP_REGISTER_BLOCK"]
+    after.extend(f"#define {name} (g_recomp_registers.r_{name[2:]})"
+                 for name in names)
+    after.append("#endif")
+    return before + lines + after + [""]
+
+
 def _wrap_calls(line, call_re, spill, reload):
     """Put `spill` right before every call in `line` and `reload` right after
     the call's own statement, so pushes on the same line (arguments, the
@@ -2615,7 +2639,7 @@ class FunctionTranslator:
         lines.append(f"}}")
         lines.append(f"")
 
-        return "\n".join(lines)
+        return "\n".join(_scope_register_block_aliases(lines))
 
     def _find_used_registers(self, instructions):
         """Find which 32-bit registers are referenced by any instruction."""
@@ -3133,6 +3157,10 @@ class BatchTranslator:
             print(f"  WARNING: could not write recomp_types.h ({e}); copy "
                   f"it from templates/runtime/ by hand or the build will "
                   f"not find it", file=sys.stderr)
+
+        registers_src = os.path.join(os.path.dirname(types_src), "recomp_registers.h")
+        with open(registers_src, encoding="utf-8") as src:
+            write_if_changed(os.path.join(output_dir, "recomp_registers.h"), src.read())
 
         # Split translations into chunks and write .c files
         generated_files = [header_path]
