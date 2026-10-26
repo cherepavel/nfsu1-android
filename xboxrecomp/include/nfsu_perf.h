@@ -14,7 +14,9 @@ enum {
     NFSU_PERF_TEX_HASH, NFSU_PERF_TEX_IMAGE, NFSU_PERF_TEX_STAGING,
     NFSU_PERF_TEX_DECODE, NFSU_PERF_TEX_DXT, NFSU_PERF_TEX_UPLOAD,
     NFSU_PERF_TEX_MIPS, NFSU_PERF_TEX_SNAPSHOT, NFSU_PERF_TEX_WORKER_WAIT,
-    NFSU_PERF_TEX_WORKER_CPU, NFSU_PERF_TEX_WORKER_COPY, NFSU_PERF_COUNT
+    NFSU_PERF_TEX_WORKER_CPU, NFSU_PERF_TEX_WORKER_COPY,
+    NFSU_PERF_PB_IDLE_TIMEOUT, NFSU_PERF_PB_IDLE_WAKE, NFSU_PERF_PB_IDLE_ERROR, NFSU_PERF_PB_SEMAPHORE,
+    NFSU_PERF_COUNT
 };
 
 #if defined(__ANDROID__) || defined(NFSU_PERF_HOST_TEST)
@@ -24,6 +26,7 @@ uint64_t nfsu_perf_begin(void);
 void nfsu_perf_end(int metric, uint64_t start);
 void nfsu_perf_add(int metric, uint64_t elapsed);
 void nfsu_perf_poll(void);
+void nfsu_perf_frame(uint32_t frame, uint64_t now);
 void nfsu_perf_role(const char *role);
 uint64_t nfsu_perf_gil_wait_sum(void);
 void nfsu_perf_kernel_resume(uint32_t ordinal, uint32_t caller,
@@ -35,6 +38,8 @@ static inline void nfsu_perf_end(int metric, uint64_t start)
 static inline void nfsu_perf_add(int metric, uint64_t elapsed)
 { (void)metric; (void)elapsed; }
 static inline void nfsu_perf_poll(void) { }
+static inline void nfsu_perf_frame(uint32_t frame, uint64_t now)
+{ (void)frame; (void)now; }
 static inline void nfsu_perf_role(const char *role) { (void)role; }
 static inline uint64_t nfsu_perf_gil_wait_sum(void) { return 0; }
 static inline void nfsu_perf_kernel_resume(uint32_t ordinal, uint32_t caller,

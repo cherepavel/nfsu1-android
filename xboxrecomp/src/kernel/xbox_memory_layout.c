@@ -1,3 +1,6 @@
+#ifndef _WIN32
+#include <errno.h>
+#endif
 /**
  * Xbox Memory Layout Implementation
  *
@@ -1217,6 +1220,8 @@ static void nv2a_thread_pause(int busy)
     } else {
         struct timespec ts;
         unsigned seen;
+        int wait_result = 0;
+        uint64_t perf_idle = nfsu_perf_begin();
         clock_gettime(CLOCK_REALTIME, &ts);
         ts.tv_nsec += 1000000L;
         if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
@@ -1224,10 +1229,14 @@ static void nv2a_thread_pause(int busy)
         seen = s_hw_wakes;
         __atomic_add_fetch(&s_hw_sleepers, 1, __ATOMIC_RELAXED);
         while (seen == s_hw_wakes)
-            if (pthread_cond_timedwait(&s_hw_cond, &s_hw_lock, &ts) != 0)
+            if ((wait_result = pthread_cond_timedwait(&s_hw_cond, &s_hw_lock, &ts)) != 0) {
                 break;
+            }
         __atomic_sub_fetch(&s_hw_sleepers, 1, __ATOMIC_RELAXED);
         pthread_mutex_unlock(&s_hw_lock);
+        nfsu_perf_end(wait_result == ETIMEDOUT ? NFSU_PERF_PB_IDLE_TIMEOUT :
+                      wait_result ? NFSU_PERF_PB_IDLE_ERROR : NFSU_PERF_PB_IDLE_WAKE,
+                      perf_idle);
     }
 #endif
 }

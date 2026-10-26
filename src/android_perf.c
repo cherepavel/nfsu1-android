@@ -21,6 +21,12 @@ typedef struct {
     PerfKernel sites[PERF_KERNEL_SITES], overflow, resumes;
 } PerfThread;
 static _Thread_local PerfThread perf;
+/* Separate from five-second windows; only non-overlapping wait/API metrics. */
+static _Thread_local struct {
+    uint64_t last, cpu, report_window;
+    unsigned reports;
+    PerfMetric metrics[NFSU_PERF_COUNT];
+} frame_perf;
 
 void nfsu_perf_role(const char *role) { perf.role = role; }
 
@@ -57,6 +63,13 @@ void nfsu_perf_add(int metric, uint64_t elapsed)
     m->count++;
     m->sum += elapsed;
     if (elapsed > m->max) m->max = elapsed;
+    if ((metric >= NFSU_PERF_VK_FENCE && metric <= NFSU_PERF_VK_PRESENT)
+        || metric >= NFSU_PERF_PB_IDLE_TIMEOUT) {
+        m = &frame_perf.metrics[metric];
+        m->count++;
+        m->sum += elapsed;
+        if (elapsed > m->max) m->max = elapsed;
+    }
 }
 
 uint64_t nfsu_perf_gil_wait_sum(void)
@@ -101,7 +114,8 @@ void nfsu_perf_poll(void)
         "spin_wait", "spin_total", "preempt_wait", "preempt_total",
         "tex_hash", "tex_image", "tex_staging", "tex_decode", "tex_dxt",
         "tex_upload", "tex_mips", "tex_snapshot", "tex_worker_wait",
-        "tex_worker_cpu", "tex_worker_copy"
+        "tex_worker_cpu", "tex_worker_copy",
+        "pb_idle_timeout", "pb_idle_wake", "pb_idle_error", "pb_semaphore"
     };
     if (!nfsu_perf_enabled || !perf.window) return;
     uint64_t now = perf_clock(CLOCK_MONOTONIC);
@@ -111,7 +125,7 @@ void nfsu_perf_poll(void)
     int used = snprintf(line, sizeof(line),
         "[PERF5] tid=%ld role=%s window_ms=%.1f cpu_ms=%.1f"
         " resume_calls=%llu resume_wait_ms=%.2f resume_kernel_ms=%.2f",
-        syscall(SYS_gettid), perf.role ? perf.role : "worker", (now - perf.window) / 1e6,
+        (long)syscall(SYS_gettid), perf.role ? perf.role : "worker", (now - perf.window) / 1e6,
         cpu >= perf.cpu ? (cpu - perf.cpu) / 1e6 : 0.0,
         (unsigned long long)perf.resumes.count,
         perf.resumes.wait_ns / 1e6, perf.resumes.kernel_ns / 1e6);
@@ -141,14 +155,14 @@ void nfsu_perf_poll(void)
         PerfKernel *site = &perf.sites[best];
         NFS_LOG_INFO("performance", "[PERFK] tid=%ld role=%s window_ms=%.1f rank=%d"
             " ordinal=%u caller=%08X calls=%llu kernel_ms=%.2f wait_ms=%.2f wait_max_ms=%.2f\n",
-            syscall(SYS_gettid), perf.role ? perf.role : "worker",
+            (long)syscall(SYS_gettid), perf.role ? perf.role : "worker",
             (now - perf.window) / 1e6, rank + 1, site->ordinal, site->caller,
             (unsigned long long)site->count, site->kernel_ns / 1e6,
             site->wait_ns / 1e6, site->wait_max / 1e6);
     }
     if (perf.overflow.count)
         NFS_LOG_INFO("performance", "[PERFK] tid=%ld bucket=overflow calls=%llu wait_ms=%.2f\n",
-            syscall(SYS_gettid), (unsigned long long)perf.overflow.count,
+            (long)syscall(SYS_gettid), (unsigned long long)perf.overflow.count,
             perf.overflow.wait_ns / 1e6);
     memset(perf.metrics, 0, sizeof(perf.metrics));
     memset(perf.sites, 0, sizeof(perf.sites));
@@ -156,4 +170,41 @@ void nfsu_perf_poll(void)
     memset(&perf.resumes, 0, sizeof(perf.resumes));
     perf.window = now;
     perf.cpu = cpu;
+}
+
+/* Called at the same flip-entry boundary as hitch/texstage. The prior flip's
+ * submit/present/fence costs belong to this callback-to-callback interval. */
+void nfsu_perf_frame(uint32_t frame, uint64_t now)
+{
+    if (!nfsu_perf_enabled) return;
+    uint64_t cpu = perf_clock(CLOCK_THREAD_CPUTIME_ID);
+    if (now - frame_perf.report_window > 10000000000ull) {
+        frame_perf.report_window = now;
+        frame_perf.reports = 0;
+    }
+    if (frame_perf.last && now > frame_perf.last
+        && now - frame_perf.last > 50000000ull && frame_perf.reports++ < 30) {
+        char line[1536];
+        int used = snprintf(line, sizeof line,
+            "[FRAMEWAIT] frame=%u begin_ns=%llu end_ns=%llu wall_ms=%.3f cpu_ms=%.3f",
+            frame, (unsigned long long)frame_perf.last, (unsigned long long)now,
+            (now - frame_perf.last) / 1e6,
+            (cpu >= frame_perf.cpu ? cpu - frame_perf.cpu : 0) / 1e6);
+        static const int ids[] = {NFSU_PERF_PB_IDLE_TIMEOUT, NFSU_PERF_PB_IDLE_WAKE, NFSU_PERF_PB_IDLE_ERROR,
+            NFSU_PERF_PB_SEMAPHORE, NFSU_PERF_VK_FENCE, NFSU_PERF_VK_ACQUIRE,
+            NFSU_PERF_VK_SUBMIT, NFSU_PERF_VK_PRESENT};
+        static const char *names[] = {"idle_timeout", "idle_wake", "idle_error", "pb_semaphore",
+            "vk_fence", "vk_acquire", "vk_submit", "vk_present"};
+        for (unsigned i = 0; i < sizeof ids / sizeof ids[0] && used > 0
+             && (size_t)used < sizeof line; i++) {
+            PerfMetric *m = &frame_perf.metrics[ids[i]];
+            used += snprintf(line + used, sizeof line - (size_t)used,
+                " %s=%llu/%.3f/%.3f", names[i], (unsigned long long)m->count,
+                m->sum / 1e6, m->max / 1e6);
+        }
+        NFS_LOG_INFO("performance", "%s\n", line);
+    }
+    frame_perf.last = now;
+    frame_perf.cpu = cpu;
+    memset(frame_perf.metrics, 0, sizeof frame_perf.metrics);
 }

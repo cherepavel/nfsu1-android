@@ -4572,6 +4572,7 @@ static void vk_flip_impl(void)
         static uint64_t last_ns, window_ns;
         static int lines;
         uint64_t now = hz_now();
+        nfsu_perf_frame(s_frame, now);
         if (last_ns) {
             uint64_t dt = now - last_ns;
             if (now - window_ns > 10000000000ull) { window_ns = now; lines = 0; }

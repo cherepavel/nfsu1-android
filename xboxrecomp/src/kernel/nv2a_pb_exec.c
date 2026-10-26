@@ -24,6 +24,7 @@
  * has not given us any vertices". RECOMP_FB_DUMP=<prefix> writes the surface to
  * <prefix>NNN.bmp, so the result can be looked at without a display.
  */
+#include "../../include/nfsu_perf.h"
 #include "../../include/nfsu_log.h"
 #include <math.h>
 #include <stdio.h>
@@ -454,7 +455,9 @@ int nv2a_pb_wait_semaphore(uint32_t guest_va, uint32_t submitted, uint32_t delta
     if (!guest_va || (guest_va & 3u)
             || guest_va != __atomic_load_n(&s_sem_va, __ATOMIC_ACQUIRE)) return 0;
     uint32_t *word = (uint32_t *)((uint8_t *)xbox_GetMemoryOffset() + guest_va);
+    uint64_t perf_wait = nfsu_perf_begin();
     nv2a_fence_wait(&s_fence_wait, word, submitted, delta, 1000000L);
+    nfsu_perf_end(NFSU_PERF_PB_SEMAPHORE, perf_wait);
     return 1;
 #else
     (void)guest_va; (void)submitted; (void)delta;
