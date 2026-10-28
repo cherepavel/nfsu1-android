@@ -5,6 +5,12 @@ Other platforms accept `RECOMP_VK_GPU_PROFILE=1`. Disabled by default.
 The selected graphics queue must support timestamps. `[GPU]` reports support
 and `[GPU5]` reports five-second aggregates of completed frames.
 
+The Android RC also disables CPU PERF5 counters during ordinary play. For a
+comparison that needs CPU counters, set `debug.nfsu.perf=1` before restarting;
+GPU profiling has its own independent switch. Detailed diagnostics can enable
+CPU counters by default, while explicit perf=0 still overrides that selection.
+Earlier dated captures used their recorded instrumentation settings.
+
 - `game_ms`: GPU queue interval from frame start to completed guest rendering,
   including uploads, mip generation, reflection assembly and barriers.
 - `present_ms`: subsequent interval through final FXAA/blit and layout transition.

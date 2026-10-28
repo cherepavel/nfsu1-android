@@ -23,7 +23,7 @@ nfsu.xbe=/path/to/Need For Speed Underground/default.xbe
 Build from the repository root, or open the root directory in Android Studio:
 
 ```sh
-./gradlew assembleDebug
+./gradlew assembleDebug -Pnfsu.registerBlock=true -Pnfsu.executorTlsArg=true
 ```
 
 Gradle installs Python dependencies in its own virtual environment, runs the
@@ -38,6 +38,9 @@ Generation tracks its inputs and writes under `android/app/build/`, so `clean` r
 all generated Android sources. No game data is packaged in the APK.
 
 Output: `android/app/build/outputs/apk/debug/app-debug.apk`.
+The current packaged RC defaults are documented in
+[Android RC build](../docs/android-rc-build.md); the optimized startup modes
+do not require ADB properties on users' devices.
 
 ## Experimental menu touch
 

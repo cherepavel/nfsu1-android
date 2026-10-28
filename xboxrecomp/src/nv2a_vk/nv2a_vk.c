@@ -1587,7 +1587,7 @@ static int cube_early_enabled(void)
             value = property;
 #endif
         const char *cube = getenv("RECOMP_VK_CUBE");
-        enabled = value && !strcmp(value, "1") && !(cube && *cube == '0');
+        enabled = cube_early_config_enabled(value, cube);
         NFS_LOG_INFO("graphics", "[VKCUBE] early assembly=%d\n", enabled);
     }
     return enabled;

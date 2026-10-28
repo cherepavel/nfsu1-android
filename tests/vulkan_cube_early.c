@@ -25,6 +25,18 @@ static uint32_t to_stored(uint32_t v, uint32_t p, uint32_t l)
 #include "../xboxrecomp/src/nv2a_vk/nv2a_vk_cube_early.h"
 int main(void)
 {
+#ifdef __ANDROID__
+    assert(cube_early_config_enabled(NULL, NULL));
+    assert(cube_early_config_enabled("", NULL));
+#else
+    assert(!cube_early_config_enabled(NULL, NULL));
+    assert(!cube_early_config_enabled("", NULL));
+#endif
+    assert(cube_early_config_enabled("1", NULL));
+    assert(!cube_early_config_enabled("0", NULL));
+    assert(!cube_early_config_enabled("invalid", NULL));
+    assert(!cube_early_config_enabled(NULL, "0"));
+    assert(!cube_early_config_enabled("1", "0"));
     VkCube c = {.image=1, .va=100, .face=100, .w=128, .size=427, .sampled=1, .sampled_frame=9};
     VkSurf *faces[6];
     for (unsigned i = 0; i < 7; i++)

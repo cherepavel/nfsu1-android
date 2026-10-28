@@ -1,3 +1,14 @@
+/* Android RC uses early assembly without a device property. Desktop retains
+ * its previous opt-in policy, and explicit overrides keep working. */
+static int cube_early_config_enabled(const char *value, const char *cube)
+{
+    int enabled = value && !strcmp(value, "1");
+#ifdef __ANDROID__
+    if (!value || !*value) enabled = 1;
+#endif
+    return enabled && !(cube && *cube == '0');
+}
+
 /* Conservative scheduling only. The existing lazy assembly remains authoritative.
  * Discover by address, never dereference a saved source slot as its identity.
  * Require all six cached faces to have changed, and leave the face set before

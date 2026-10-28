@@ -1,5 +1,11 @@
 # Experimental render-pass consumer scope
 
+The Android RC now enables the scoped barrier when its property is unset or
+empty. Explicit 0 or invalid nonempty values select the original barrier;
+clearing an override restores the scoped default. Desktop remains unchanged.
+See [RC configuration](android-rc-build.md). The dated experiments below
+describe their historical defaults and captured settings before this rollout.
+
 2026-10-21. Hypothesis for ASUS Zenfone 7 Pro / Adreno 650, Options → Camera:
 `begin_rendering`'s ALL_COMMANDS → ALL_COMMANDS barrier may serialize the next
 pass's vertex/binning work behind previous fragment work. This is a concrete
@@ -11,10 +17,11 @@ It motivates testing this renderer; it does not predict an Adreno speedup.
 
 ## Change and dependency audit
 
-Android `debug.nfsu.pass_barrier=1` opts in; unset/0/invalid retains the original
-barrier. Polling occurs at the first pass and at least 300 flips after the last
+Android `debug.nfsu.pass_barrier=1` selects scoped consumers; unset/empty now
+also selects them. Explicit 0/invalid retains the original barrier. Polling
+occurs at the first pass and at least 300 flips after the last
 check. `[VKBARRIER] scoped_pass=N frame=...` in **performance.log** confirms
-actual selection. The default remains off, pending visual and timing evidence.
+actual selection. It was default-off during the historical captures below.
 
 Only the normal barrier immediately before a new guest rendering instance
 changes. Both modes issue one barrier and reset the same surface dirty flags.

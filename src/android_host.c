@@ -21,6 +21,7 @@
 #include "android_env.h"
 #include "android_input_trace.h"
 #include "android_logs.h"
+#include "android_runtime_options.h"
 #include <fcntl.h>
 
 int android_host_boot(int argc, char **argv)
@@ -66,7 +67,7 @@ int android_host_boot(int argc, char **argv)
     NFS_LOG_INFO("system", "[ANDROID] detailed diagnostics=%d\n", nfsu_diagnostics_enabled);
     char perf_mode[PROP_VALUE_MAX] = {0};
     __system_property_get("debug.nfsu.perf", perf_mode);
-    nfsu_perf_enabled = strcmp(perf_mode, "0") != 0;
+    nfsu_perf_enabled = android_runtime_option_enabled(perf_mode, nfsu_diagnostics_enabled);
     NFS_LOG_INFO("system", "[ANDROID] performance counters=%d\n", nfsu_perf_enabled);
     setenv("NFSU2_GAME_DIR", argv[1], 1);
     setenv("NFSU2_SAVE_DIR", save, 1);
@@ -88,7 +89,7 @@ int android_host_boot(int argc, char **argv)
     NFS_LOG_INFO("system", "[ANDROID] guest scheduler=%s\n", getenv("RECOMP_GUEST_SCHEDULER"));
     char executor[PROP_VALUE_MAX] = {0};
     __system_property_get("debug.nfsu.executor", executor);
-    setenv("RECOMP_GUEST_EXECUTOR", strcmp(executor, "1") == 0 ? "1" : "0", 1);
+    setenv("RECOMP_GUEST_EXECUTOR", android_runtime_option_enabled(executor, 1) ? "1" : "0", 1);
     NFS_LOG_INFO("system", "[ANDROID] guest executor=%s (experimental)\n", getenv("RECOMP_GUEST_EXECUTOR"));
     setenv("RECOMP_CULL", "0", 0);
     setenv("RECOMP_VK_INSTANCE", "0", 0);
