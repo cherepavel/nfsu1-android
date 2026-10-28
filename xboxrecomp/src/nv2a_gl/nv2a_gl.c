@@ -2568,6 +2568,7 @@ static Nv2aBackend s_backend_q = {
     q_flip,
     q_draw,
     NV2A_BACKEND_RAW_DIRECT,
+    NULL,
 };
 
 static const Nv2aBackend s_backend_gl = {
@@ -2576,6 +2577,7 @@ static const Nv2aBackend s_backend_gl = {
     gl_flip,
     gl_draw_raw,
     NV2A_BACKEND_RAW_DIRECT,
+    NULL,
 };
 
 void nv2a_gl_install(void)

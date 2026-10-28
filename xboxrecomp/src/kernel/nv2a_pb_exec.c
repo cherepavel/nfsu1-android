@@ -40,6 +40,7 @@
 #include "../d3d/d3d8_dxt.h"
 #include "nv2a_backend.h"
 #include "nv2a_indices.h"
+#include "nv2a_ui_marker.h"
 #ifdef __ANDROID__
 #include "nv2a_fence_wait.h"
 static Nv2aFenceWait s_fence_wait = NV2A_FENCE_WAIT_INITIALIZER;
@@ -4075,6 +4076,12 @@ static void flip_apply_retired(void)
 void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
 {
     static int inited;
+    int ui_begin;
+    if (nv2a_ui_marker(subch, method, param, &ui_begin)) {
+        if (!s_gpu.prim && s_backend && s_backend->ui_phase)
+            s_backend->ui_phase(ui_begin);
+        return;
+    }
 
     /* The shadow is the 3D class's register file: methods to the other
      * subchannels (2D surfaces, blits) share its offsets and must not land

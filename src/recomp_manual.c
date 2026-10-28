@@ -1633,6 +1633,38 @@ extern void sub_00016460_gen(void);
 extern void sub_000C1860_gen(void);
 static uint32_t s_menu_size_user;       /* bits the slider last stored */
 
+#if defined(__ANDROID__) && defined(NFSU2_VULKAN)
+#include <sys/system_properties.h>
+#include "../xboxrecomp/src/kernel/nv2a_ui_marker.h"
+static int ui_native_marker_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        char property[PROP_VALUE_MAX] = {0};
+        const char *value = getenv("RECOMP_VK_UI_NATIVE");
+        if (!value && __system_property_get("debug.nfsu.ui_native", property) > 0) value = property;
+        enabled = value && !strcmp(value, "1");
+    }
+    return enabled;
+}
+/* Insert in the producer's own D3D buffer, before publication to the renderer.
+ * Never call the backend directly from this thread. If the native reserve
+ * margin is exhausted, skip the marker instead of changing guest ABI/state.
+ * D3D's existing writers reserve at device+4; require both words before it. */
+static int ui_native_marker_write(uint32_t param)
+{
+    uint32_t device = MEM32(0x001DE9E8u), at, limit;
+    if (!audio_pointer_ok(device, 8)) return 0;
+    at = MEM32(device); limit = MEM32(device + 4);
+    if (!audio_pointer_ok(at, 8) || at > UINT32_MAX - 8 || at + 8 > limit) return 0;
+    MEM32(at) = NV2A_UI_PACKET;
+    MEM32(at + 4) = param;
+    MEM32(device) = at + 8;
+    return 1;
+}
+static unsigned s_ui_marker_depth;
+#endif
+
 void sub_00016460(void)
 {
     uint32_t v = MEM32(NFSU1_MENU_SIZE);
@@ -1643,7 +1675,18 @@ void sub_00016460(void)
     if (v != s_menu_size_user && f > 0.919f && f < 0.921f)
         MEM32(NFSU1_MENU_SIZE) = 0x3F800000u;   /* 1.0f */
     s_ui_aspect_active = horplus_on() && MEM32(NFSU1_GAMEFLOW_STATE) == 6;
+#if defined(__ANDROID__) && defined(NFSU2_VULKAN)
+    int marked = 0;
+    if (ui_native_marker_enabled() && s_ui_marker_depth++ == 0)
+        marked = ui_native_marker_write(NV2A_UI_BEGIN);
+#endif
     sub_00016460_gen();
+#if defined(__ANDROID__) && defined(NFSU2_VULKAN)
+    if (ui_native_marker_enabled()) {
+        if (marked) ui_native_marker_write(NV2A_UI_END);
+        s_ui_marker_depth--;
+    }
+#endif
     s_ui_aspect_active = previous;
 }
 

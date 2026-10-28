@@ -167,6 +167,8 @@ typedef struct {
     void (*draw_raw)(const Nv2aRawBatch *b);
     /* NV2A_BACKEND_* bits. */
     uint32_t flags;
+    /* Optional ordered private UI marker, on the renderer thread. */
+    void (*ui_phase)(int begin);
 } Nv2aBackend;
 
 /* draw_raw takes attributes in their stored format (Nv2aRawBatch.attr_direct).

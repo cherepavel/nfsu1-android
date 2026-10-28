@@ -724,6 +724,10 @@ static int make_image(uint32_t w, uint32_t h, VkFormat fmt, VkImageUsageFlags us
 
 /* ── Surfaces ─────────────────────────────────────────────────────── */
 
+static void native_ui_drop(VkSurf *s);
+static void native_ui_restore(VkSurf *s, int discard);
+static void pend_flush(void);
+
 static VkSurf *surf_find(uint32_t va)
 {
     int i;
@@ -766,6 +770,7 @@ static VkSurf *surf_get(uint32_t va, uint32_t w, uint32_t h, uint32_t aa_sx, uin
     if (s->image) {
         if (s_rt == s) end_rendering(), s_rt = NULL;
         if (s_last == s) s_last = NULL;
+        native_ui_drop(s);
         garbage_add(s->image, s->view, s->mem);
     }
     memset(s, 0, sizeof *s);
@@ -807,6 +812,7 @@ static void rescale_surfaces(double k)
         uint32_t pw, ph;
         if (!s->image)
             continue;
+        native_ui_restore(s, 0);
         color_ready(s);
         stored_size(s->w, s->h, s->aa_sx, &pw, &ph);
         if (pw == s->pw && ph == s->ph)
@@ -887,9 +893,12 @@ static VkDepthBuf *depth_get(uint32_t va, uint32_t pw, uint32_t ph)
     return d;
 }
 
+#include "nv2a_vk_ui_native.h"
+
 /* The target of a draw or clear: surface (created on first use) and the
  * depth buffer of its zeta address. */
-static VkSurf *target(const Nv2aSurface *sf, uint32_t zeta_va, VkDepthBuf **dout)
+static VkSurf *target(const Nv2aSurface *sf, uint32_t zeta_va, VkDepthBuf **dout,
+                      int ui_draw, uint32_t clear_flags)
 {
     uint32_t bpp = sf->bytes_per_pixel ? sf->bytes_per_pixel : 4;
     uint32_t w = sf->pitch ? sf->pitch / bpp : sf->width;
@@ -901,7 +910,8 @@ static VkSurf *target(const Nv2aSurface *sf, uint32_t zeta_va, VkDepthBuf **dout
     if (!w || !h || !sf->color_va || w > 4096 || h > 4096)
         return NULL;
     s = surf_get(sf->color_va, w, h, sf->aa_sx ? sf->aa_sx : 1, sf->aa_sy ? sf->aa_sy : 1);
-    if (s && zeta_va)
+    if (s) native_ui_select(s, ui_draw, clear_flags);
+    if (s && zeta_va && !s_native_ui[s - s_surf].active)
         *dout = depth_get(zeta_va, s->pw, s->ph);
     if (s)
         s_last = s;
@@ -3911,7 +3921,7 @@ static void vk_draw_raw_impl(const Nv2aRawBatch *b)
         return;
     VT("draw: prim %u idx %u verts %u attrs %04X direct %04X xform %u surf %08X zeta %08X\n", b->prim, n,
        b->vertex_count, b->attr_present, b->attr_direct, b->xform, b->surface.color_va, b->zeta_va);
-    s = target(&b->surface, b->zeta_va, &d);
+    s = target(&b->surface, b->zeta_va, &d, native_ui_color_only(r), 0);
     if (!s)
         return;
     s_drew_any = 1;
@@ -3928,6 +3938,7 @@ static void vk_draw_raw_impl(const Nv2aRawBatch *b)
     if (!p)
         return;
     s_hz_draws++;
+    if (s_native_ui[s - s_surf].active) s_native_ui_draws++;
 
     /* Assemble known reflections at the face -> scene boundary, before the
      * scene begins. First use and partial/late updates retain the lazy path. */
@@ -4187,7 +4198,7 @@ static void vk_clear(const Nv2aSurface *sf, const Nv2aRenderState *rs,
     if (!ready())
         return;
     pend_flush();
-    s = target(sf, rs ? rs->zeta_va : 0, &d);
+    s = target(sf, rs ? rs->zeta_va : 0, &d, 0, flags);
     if (!s)
         return;
     memset(&rect, 0, sizeof rect);
@@ -4629,9 +4640,16 @@ static void vk_flip_impl(void)
     if (!ready())
         return;
     pend_flush();
+    s_native_ui_phase = 0; /* also recover from a skipped closing marker */
     s_frame++;
     if (s_frame % 300 == 0) {
         pool_report();
+        if (native_ui_enabled())
+            NFS_LOG_INFO("graphics", "[VKUI] frame=%u switches=%llu restores=%llu preserve_copies=%llu ui_draws=%llu markers=%llu/%llu\n",
+                s_frame, (unsigned long long)s_native_ui_switches,
+                (unsigned long long)s_native_ui_restores, (unsigned long long)s_native_ui_preserves,
+                (unsigned long long)s_native_ui_draws,
+                (unsigned long long)s_native_ui_begins, (unsigned long long)s_native_ui_ends);
         if (cube_early_enabled())
             NFS_LOG_INFO("graphics", "[VKCUBE] frame=%u early=%u lazy=%u early_used=%u same_frame_fallback=%u\n",
                 s_frame, s_cube_early_builds, s_cube_lazy_builds,
@@ -4845,15 +4863,9 @@ static void vk_flip_impl(void)
             int dw = 0, dh = 0, dx = 0, dy = 0;
             have_image = 1;
             if (s && s_drew_any) {
-                /* The logical aspect (16:9 for a widescreen title),
-                 * letterboxed. Rows are top-first on both sides. */
-                float lw = (float)s->w / (float)s->aa_sx, lh = (float)s->h / (float)s->aa_sy;
-                float ww = (float)s_sc_logical_extent.width, wh = (float)s_sc_logical_extent.height, scale;
-                if (xbox_video_widescreen() && lw < lh * 1.5f)
-                    lw = lh * 16.0f / 9.0f;
-                scale = ww / lw < wh / lh ? ww / lw : wh / lh;
-                dw = (int)(lw * scale); dh = (int)(lh * scale);
-                dx = ((int)ww - dw) / 2; dy = ((int)wh - dh) / 2;
+                VkRect2D output = native_ui_output_rect(s);
+                dw = (int)output.extent.width; dh = (int)output.extent.height;
+                dx = output.offset.x; dy = output.offset.y;
             }
             int antialias = fxaa_on();
             if (dw > 0 && dh > 0 && (antialias || s_sc_rotation)
@@ -5017,6 +5029,7 @@ static const Nv2aBackend s_backend = {
     vk_flip,
     vk_draw_raw,
     NV2A_BACKEND_RAW_DIRECT,
+    native_ui_phase,
 };
 
 void nv2a_vk_install(void)
