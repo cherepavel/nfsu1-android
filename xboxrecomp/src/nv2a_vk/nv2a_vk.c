@@ -140,6 +140,7 @@ static int              s_have_bc, s_have_depth_clamp;
 static float s_gpu_period;
 static uint32_t s_gpu_bits;
 static int s_gpu_profile;
+static int s_gpu_cube_profile;
 
 static PFN_vkCmdPushDescriptorSetKHR  p_push_desc;
 static PFN_vkCmdSetVertexInputEXT     p_vertex_input;
@@ -219,7 +220,7 @@ static VkDeviceMemory alloc_mem(VkMemoryRequirements rq, VkMemoryPropertyFlags w
 #define VK_FRAMES 2
 #define VK_CBS 8
 #define GPU_PASS_LIMIT 64
-#define GPU_QUERY_COUNT (3 + GPU_PASS_LIMIT * 2)
+#include "nv2a_vk_cube_profile.h"
 #define RING_BYTES (48u << 20)
 
 typedef struct {
@@ -244,6 +245,7 @@ typedef struct {
     uint64_t gpu_depth_load_pixels, gpu_depth_store_pixels;
     uint32_t gpu_pass_count;
     int gpu_active_pass;
+    VkCubeProfile gpu_cube;
     struct {
         uint32_t target, width, height, clears, depth;
         uint64_t draws, indices, compact_eligible, compact_selected;
@@ -322,6 +324,8 @@ static void gpu_report(Frame *f)
     static double game_sum, present_sum, game_max, present_max;
     static uint64_t passes, barriers, pass_barriers, blits, draws, indices;
     static uint64_t depth_passes, depth_load_pixels, depth_store_pixels;
+    static uint64_t cube_timed, cube_missing, cube_overflow, cube_faces, cube_mip_blits;
+    static double cube_copy_sum, cube_mip_sum;
     static struct {
         uint32_t target, width, height, depth;
         const char *end_reason;
@@ -350,6 +354,17 @@ static void gpu_report(Frame *f)
     depth_passes += f->gpu_depth_passes;
     depth_load_pixels += f->gpu_depth_load_pixels;
     depth_store_pixels += f->gpu_depth_store_pixels;
+    if (s_gpu_cube_profile) {
+        VkCubeProfileTimes times = gpu_cube_profile_read(&f->gpu_cube,
+            s_dev, f->gpu_queries, s_gpu_bits, s_gpu_period);
+        cube_copy_sum += times.copy_ms;
+        cube_mip_sum += times.mip_ms;
+        cube_timed += times.timed;
+        cube_missing += times.missing;
+        cube_overflow += f->gpu_cube.overflow;
+        cube_faces += f->gpu_cube.faces;
+        cube_mip_blits += f->gpu_cube.mip_blits;
+    }
     uint64_t pass_ticks[GPU_PASS_LIMIT * 2];
     if (f->gpu_pass_count && vkGetQueryPoolResults(s_dev, f->gpu_queries,
             3, f->gpu_pass_count * 2, sizeof pass_ticks, pass_ticks,
@@ -396,6 +411,14 @@ static void gpu_report(Frame *f)
             (double)draws / count, (double)indices / count,
             (double)depth_passes / count, (double)depth_load_pixels / count / 1e6,
             (double)depth_store_pixels / count / 1e6);
+        if (s_gpu_cube_profile)
+            NFS_LOG_INFO("performance", "[GPUCUBE] frames=%llu builds_per_frame=%.3f timed_per_frame=%.3f copy_ms=%.3f mip_ms=%.3f total_ms=%.3f faces_per_frame=%.1f mip_blits_per_frame=%.1f missing=%llu overflow=%llu\n",
+                (unsigned long long)count,
+                (double)(cube_timed + cube_missing + cube_overflow) / count,
+                (double)cube_timed / count, cube_copy_sum / count, cube_mip_sum / count,
+                (cube_copy_sum + cube_mip_sum) / count, (double)cube_faces / count,
+                (double)cube_mip_blits / count,
+                (unsigned long long)cube_missing, (unsigned long long)cube_overflow);
         for (unsigned rank = 0; rank < 10; rank++) {
             unsigned best = GPU_PASS_LIMIT;
             for (unsigned j = 0; j < GPU_PASS_LIMIT; j++)
@@ -416,6 +439,8 @@ static void gpu_report(Frame *f)
         overflow_ms = 0;
         count = passes = barriers = pass_barriers = blits = draws = indices = 0;
         depth_passes = depth_load_pixels = depth_store_pixels = 0;
+        cube_timed = cube_missing = cube_overflow = cube_faces = cube_mip_blits = 0;
+        cube_copy_sum = cube_mip_sum = 0;
         game_sum = present_sum = game_max = present_max = 0;
         last = now;
     }
@@ -439,6 +464,7 @@ static void frame_begin(void)
     s_f->gpu_depth_load_pixels = s_f->gpu_depth_store_pixels = 0;
     s_f->gpu_pass_count = 0;
     s_f->gpu_active_pass = -1;
+    gpu_cube_profile_reset(&s_f->gpu_cube);
     garbage_free(s_f);
     s_f->ring_off = 0;
     s_ring_gen++;
@@ -448,7 +474,8 @@ static void frame_begin(void)
     s_cb = s_f->cbs[0];
     vkBeginCommandBuffer(s_cb, &bi);
     if (s_f->gpu_queries) {
-        vkCmdResetQueryPool(s_cb, s_f->gpu_queries, 0, s_gpu_profile == 1 ? GPU_QUERY_COUNT : 3);
+        vkCmdResetQueryPool(s_cb, s_f->gpu_queries, 0,
+            gpu_timestamp_query_count(s_gpu_profile, s_gpu_cube_profile));
         vkCmdWriteTimestamp(s_cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, s_f->gpu_queries, 0);
     }
     s_cb_gen++;
@@ -1446,7 +1473,7 @@ static VkImageView cube_from_surfaces(uint32_t va, uint32_t w, uint32_t h, uint3
                                       VkSurf *faces[6])
 {
     VkCube *c = NULL;
-    uint32_t f, size = 0;
+    uint32_t f, size = 0, cube_query = UINT32_MAX;
     int i, copied = 0;
 
     for (f = 0; f < 6; f++)
@@ -1497,6 +1524,8 @@ static VkImageView cube_from_surfaces(uint32_t va, uint32_t w, uint32_t h, uint3
         color_ready(sf);
         if (!copied) {
             end_rendering();
+            cube_query = gpu_cube_profile_begin(&s_f->gpu_cube, s_cb,
+                s_f->gpu_queries, s_gpu_profile, s_gpu_cube_profile);
             barrier_all();
             copied = 1;
         }
@@ -1515,10 +1544,12 @@ static VkImageView cube_from_surfaces(uint32_t va, uint32_t w, uint32_t h, uint3
         if (s_f->gpu_queries) s_f->gpu_blits++;
         vkCmdBlitImage(s_cb, sf->image, VK_IMAGE_LAYOUT_GENERAL, c->image,
                        VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
+        if (s_gpu_cube_profile && s_f->gpu_queries) s_f->gpu_cube.faces++;
         c->src[f] = sf;
         c->gen[f] = sf->gen;
     }
     if (copied) {
+        gpu_cube_profile_stamp(&s_f->gpu_cube, s_cb, s_f->gpu_queries, cube_query, 1);
         if (s_cube_early_preparing) {
             s_cube_early_builds++;
             c->early_frame = s_frame;
@@ -1528,9 +1559,13 @@ static VkImageView cube_from_surfaces(uint32_t va, uint32_t w, uint32_t h, uint3
             if (c->early_frame == s_frame && c->early_frame)
                 s_cube_early_fallbacks++;
         }
-        if (c->levels > 1)
+        if (c->levels > 1) {
             gen_mips(c->image, size, size, c->levels, 6);
+            if (s_gpu_cube_profile && s_f->gpu_queries)
+                s_f->gpu_cube.mip_blits += c->levels - 1;
+        }
         barrier_all();
+        gpu_cube_profile_stamp(&s_f->gpu_cube, s_cb, s_f->gpu_queries, cube_query, 2);
     }
     return c->view;
 }
@@ -2974,9 +3009,16 @@ static int ready(void)
             if (!strcmp(profile, "1")) s_gpu_profile = 1;
             if (!strcmp(profile, "2")) s_gpu_profile = 2;
         }
-        NFS_LOG_INFO("graphics", "[GPU] timestamps=%d valid_bits=%u period_ns=%g mode=%d pass_timestamps=%d\n",
+        const char *cube_profile = getenv("RECOMP_VK_CUBE_PROFILE");
+#ifdef __ANDROID__
+        char cube_property[PROP_VALUE_MAX] = {0};
+        if (!cube_profile && __system_property_get("debug.nfsu.cube_profile", cube_property) > 0)
+            cube_profile = cube_property;
+#endif
+        s_gpu_cube_profile = s_gpu_profile == 1 && cube_profile && !strcmp(cube_profile, "1");
+        NFS_LOG_INFO("graphics", "[GPU] timestamps=%d valid_bits=%u period_ns=%g mode=%d pass_timestamps=%d cube_timestamps=%d\n",
             s_gpu_profile != 0, s_gpu_bits, (double)s_gpu_period,
-            s_gpu_profile, s_gpu_profile == 1);
+            s_gpu_profile, s_gpu_profile == 1, s_gpu_cube_profile);
     }
     qci.queueFamilyIndex = s_qfam;
     qci.queueCount = 1;
@@ -3129,7 +3171,7 @@ static int ready(void)
         if (s_gpu_profile) {
             VkQueryPoolCreateInfo qi = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
             qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
-            qi.queryCount = s_gpu_profile == 1 ? GPU_QUERY_COUNT : 3;
+            qi.queryCount = gpu_timestamp_query_count(s_gpu_profile, s_gpu_cube_profile);
             if (vkCreateQueryPool(s_dev, &qi, NULL, &f->gpu_queries) != VK_SUCCESS) {
                 f->gpu_queries = VK_NULL_HANDLE;
                 NFS_LOG_WARN("graphics", "[GPU] timestamp pool unavailable\n");
