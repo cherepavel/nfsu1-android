@@ -243,3 +243,225 @@ The summary command uses TID 21596, since 11:47:22, sample-after 11:49:17.
 Pass barrier was restored to 0. The following unused-depth experiment uses a
 new APK; its next-launch diagnostic settings are documented separately in
 [vulkan-unused-depth.md](vulkan-unused-depth.md).
+
+## Poco Camera follow-up, 2026-10-28
+
+The user authorized checking submission gaps and barriers after the reflection
+copy timing. Poco 24095PCADG, PID 10873 / renderer TID 12593 / executor TID
+12590; startup 15:12:15 MSK. Actual kick=0, early cube assembly=1, native UI=0,
+lazy_clear=0, state cache=1. This run deliberately retains detailed profile=1
+and cube timestamps=1 from the preceding kick comparison; it is **not** the
+coarse-profile protocol above. Camera remains at 100%, FXAA/reflections/square
+on, aniso16, fps60, blur0. Options and TRACE environment are byte-identical
+across captures. No renderer policy/source change, build, install, restart or
+game navigation was performed by the agent during this live comparison.
+
+First live marker: mode 1 at 15:18:28.986, frame 22200. Return to mode 0 at
+15:20:04.096, frame 27900. Select whole GPU5 report intervals inside the
+explicit boundaries below, excluding fifteen seconds after actual markers.
+CPU rows use independently complete PERF5 windows. Each early stage contains
+seven GPU5 windows; A1/B1 have 2100 frames and A2 has 2099.
+
+| Stage | Selected interval MSK | Game ms | Output ms | Total ms | Cube assembly ms |
+| --- | --- | ---: | ---: | ---: | ---: |
+| A1, original | 15:17:43–15:18:23 | 4.0214 | 2.6076 | 6.6290 | 0.1744 |
+| B1, scoped | 15:18:43.986–15:19:23.986 | 3.4587 | 2.5997 | 6.0584 | 0.1736 |
+| A2, original return | 15:20:19.096–15:20:59.096 | 4.0557 | 2.6197 | 6.6754 | 0.1757 |
+
+The first pair differs by -0.5706 ms total and returning to original adds
+0.6169 ms. Draws average 632.29 / 624.50 / 624.42 and indices 65134 / 65112 /
+65085; animated/instanced draw counts differ, while index workload is close.
+Renderer flips/s are 59.9428 / 59.9402 / 59.9136 and CPU 66.76 / 66.13 /
+66.38 percent of one core. This is a promising local queue-time result,
+not an FPS, energy or isolated GPU-instruction improvement.
+
+All selected reports retain 16 instances, 13 image blits, 11 depth instances
+and 1.872 nominal depth LOAD/STORE Mpix each. There is one queue submit per
+flip. Original mode uses 18 full barriers; scoped mode uses 3 full plus 15
+scoped, retaining 18 total. Every completed frame has one measured cube build,
+six face copies and seven mip blits, with no missing/overflow groups. Screenshots
+at the sampled stages show Camera without obvious corruption; they do not
+establish temporal/pixel equivalence or racing/lifecycle correctness.
+
+### Later repeat and state drift
+
+Wireless ADB disappeared and returned under a second mDNS name. The attempted
+connection to the old direct IP endpoint was refused; it did not establish an
+extra IP transport. The game PID/TIDs stayed unchanged. A1's current log had
+rotated; its dated rotation was retained and prepended before summarization.
+
+During the longer interruption, timings changed globally while mode was still
+0: final output rose to about 6.16 ms and cube assembly to about 0.354 ms,
+roughly twice their earlier values, with the same command counters/settings.
+This predates B2's mode-1 marker at 15:25:26.889, frame 39000. It cannot be
+attributed to that switch. Clocks are not controlled/measured, so the cause
+is not established. Later thermal service reports status 0 and current HAL
+GPU 48.919 C, battery 37 C; this snapshot neither explains the drift nor
+establishes a cooling result.
+
+Exploratory adjacent controls were added after observing this drift. A3 uses
+the fixed interval marker(B2)-45 seconds through marker(B2)-5 seconds. A4
+uses the same +15-second warmup / 40-second selection after final rollback.
+These post-hoc controls are kept separate from the first A1/B1/A2 cycle.
+
+| Stage | Windows / frames | Game ms | Output ms | Total ms | Cube ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| A3, original before B2 | 7 / 2100 | 8.3469 | 6.1586 | 14.5054 | 0.3540 |
+| B2, scoped, incomplete repeat | 5 / 1501 | 7.3473 | 6.2699 | 13.6172 | 0.3640 |
+| A4, original after rollback | 7 / 2100 | 8.3361 | 6.1466 | 14.4827 | 0.3539 |
+
+B2's planned 15:25:41.889–15:26:21.889 selection contains a presentation
+rebuild at 15:26:10.063. Its five complete report intervals end by 15:26:07.219;
+the next report ends only at 15:27:02.319 with 133 frames and spans a lifecycle
+gap, so is excluded. Presentation logs also show rotation changes/rebuilds
+at 15:24:00.434, 15:24:09.912, 15:24:22.062 and 15:27:02.318. The complete
+B2 repetition is therefore not a clean confirmation, despite the lower
+local interval relative to its adjacent exploratory controls. Do not pool
+the early and late regimes or publish one general speedup percentage.
+
+Final rollback is confirmed at 15:27:24.868, frame 42900, mode=0. The shipping
+default remains off. At 15:34:19 only next-launch profiling was prepared:
+gpu_profile=2, cube_profile=0, with kick=0, cube_early=1 and pass_barrier=0.
+PID 10873 continues its startup detailed/cube profiling until the user fully
+restarts it. No new APK is needed. Recheck the barrier cycle in the coarse
+mode while keeping Camera foreground and orientation fixed; verify actual
+startup mode=2/pass_timestamps=0/cube_timestamps=0. This confirmation remains
+pending, as do profiling-disabled performance, racing and visual validation.
+
+Raw snapshots, dated rotation, exact stage selections, helper and per-stage
+GPU/CPU/cube summaries are in the ignored directory
+performance-results/2026-10-28/poco-submit-analysis/pass-barrier/.
+
+## Poco coarse-profile confirmation, 2026-10-28
+
+The user fully restarted and returned to Camera. PID 12619 / renderer TID
+21493 / executor TID 21468; GPU startup at 15:36:58.543 confirms mode=2,
+pass_timestamps=0, cube_timestamps=0, 64 valid bits and 76.9231 ns period.
+Kick remains 0, early cube assembly 1, native UI 0, lazy clears 0 and runtime
+executor 1. Camera still uses 100%, reflections/FXAA/square on, aniso16,
+fps60 and blur0. Options and TRACE environment are byte-identical across
+all four stages and the end capture. No build, installation, restart or game
+input was performed by the agent. This is a separate process from the earlier
+detailed run; only within-process mode comparisons support the result below.
+
+A1 selects already steady menu reports before the initial screenshot, with
+the expected workload checked in every report. Each subsequent selection
+starts fifteen seconds after its actual VKBARRIER marker and spans thirty
+seconds; only complete GPU5 intervals are included. Screenshots and thermal
+snapshots are taken outside these selected intervals. Capture helpers reject
+a changed PID, graphics/env mismatch or presentation rebuild during a stage.
+
+| Stage | Selected interval MSK | Windows / frames | Game ms | Output ms | Combined ms |
+| --- | --- | ---: | ---: | ---: | ---: |
+| A1, original | 15:38:01.259–15:38:41.259 | 7 / 2100 | 4.1520 | 2.5819 | 6.7339 |
+| B1, scoped | 15:40:02.091–15:40:32.091 | 5 / 1499 | 3.4380 | 2.5820 | 6.0200 |
+| A2, original return | 15:41:32.205–15:42:02.205 | 5 / 1500 | 4.1196 | 2.5996 | 6.7192 |
+| B2, scoped repeat | 15:43:22.329–15:43:52.329 | 5 / 1500 | 3.4606 | 2.5826 | 6.0432 |
+
+The first pair's combined interval falls by 0.7139 ms; the return adds
+0.6992 ms, and the second on pair falls by 0.6760 ms. Pooling complete frames
+within each mode gives game interval 4.1385→3.4493 ms and output
+2.5893→2.5823 ms, a 0.6962 ms lower combined elapsed queue interval. This
+reproduces the local benefit without per-pass/cube timestamps, unlike the
+earlier incomplete detailed repeat. Queue timing still is not isolated GPU
+busy/instruction time, and three frame timestamps remain enabled.
+
+All 22 selected windows retain 16 rendering instances, 13 blits, 11 depth
+instances and 1.872 nominal depth LOAD/STORE Mpix each. Original mode uses
+18 full barriers; scoped mode uses 3 full plus 15 scoped, retaining 18 total.
+Each mode uses one queue submit per flip. Draws average 624.33 / 623.97 /
+636.58 / 624.50 and indices 65099 / 65040 / 65314 / 65097; the animated,
+instanced scene is comparable rather than identical. Separate complete
+renderer PERF5 windows give 59.9380 / 59.9011 / 59.9403 / 59.9465 flips/s and
+46.46 / 46.93 / 48.85 / 47.86 percent CPU of one core. No renderer FPS or
+consistent CPU reduction is established at the 60 FPS cap.
+
+The graphics log contains only the startup presentation selection: rotation=1,
+logical 2712x1220 and physical buffer 1220x2712. There are no subsequent
+VKROT rebuilds, changed processes or lifecycle gaps through the end capture.
+No GPUPASS/GPUCUBE records appear for this renderer/launch, confirming the
+coarse mode is actually active. Stage screenshots retain the car/reflections,
+lighting and menu text without obvious corruption; these are not pixel or
+temporal correctness tests. Frequency was not controlled, and thermal service
+snapshots do not establish an energy/heating reduction or transfer to ASUS/250%.
+
+Final rollback is confirmed at 15:45:12.463, frame 29400, mode=0. At the
+15:46:35 end capture the same PID remains active with gpu_profile=2, kick=0,
+cube_early=1 and pass_barrier=0. No shipping default or barrier source changes
+were made. The scoped mode is now a reproducible menu candidate on this Poco;
+race/visual/lifecycle checks and profiling-disabled performance confirmation
+remain before recommending it as a general default. The user can enter racing
+in this process without rebuilding or restarting for the next validation.
+
+Raw stage logs, screenshots, options/environment, thermal snapshots,
+exact selections, capture/summary helpers and comparison.json are under
+performance-results/2026-10-28/poco-submit-analysis/pass-barrier-coarse/.
+
+## Poco race check, 2026-10-28
+
+The user entered racing in the same PID 12619 / renderer TID 21493. Coarse
+profile=2, cube timestamps=0, kick=0, early cube assembly=1, executor=1,
+native UI=0 and lazy clears=0 remain unchanged. Graphics remain at 100%,
+reflections/FXAA/square on, aniso16, fps60 and blur0. Options and the retained
+TRACE environment are byte-identical across all captures. Only the existing
+live barrier property is switched. No source policy/default, build, install,
+process restart or game input is performed by the agent.
+
+Actual markers are scoped=1 at 15:50:54.058 / frame 49500, scoped=0 at
+15:53:43.134 / frame 59400, and scoped=1 at 15:55:28.254 / frame 65700.
+Selections use whole GPU5 report intervals, with fifteen seconds excluded
+after each actual switch. CPU rows use independently complete PERF5 windows.
+
+| Stage | Selected interval MSK | Windows / frames | Game ms | Output ms | Draws | Indices | Renderer flips/s |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| A1, original, moving race | 15:49:16.967–15:49:56.967 | 7 / 2049 | 7.4459 | 3.7657 | 2424.95 | 261806 | 58.4143 |
+| B1, scoped, moving race | 15:51:09.058–15:51:39.058 | 5 / 1465 | 5.9340 | 3.5686 | 2145.78 | 244350 | 58.5513 |
+| A2, original, stopped car | 15:53:58.134–15:54:28.134 | 5 / 1500 | 6.0426 | 3.2534 | 1757.56 | 198052 | 59.9719 |
+| B2, scoped, stopped car | 15:55:43.254–15:56:13.254 | 5 / 1500 | 5.0038 | 3.2540 | 1755.40 | 198063 | 59.9374 |
+
+A1/B1 is a functional moving-race check, not a matched performance comparison:
+B1 has about 11.5% fewer draws and 6.7% fewer indices on different road
+segments. Its shorter interval does not isolate a barrier gain or establish
+an FPS improvement. During B1 the user was explicitly asked about flicker,
+missing objects and reflection/lighting errors, and answered that everything
+looked normal. Screenshots show the road, car, lighting and HUD without
+obvious corruption, with progression from lap one into lap two.
+
+Later images show the car stopped at 0 MPH in the same position across A2/B2;
+the race clock and HUD keep updating. This is an exploratory same-position
+race pair. Game interval falls by 1.0388 ms, output differs by +0.0006 ms,
+and combined interval falls from 9.2960 to 8.2578 ms. Draw count differs by
+-0.12%, indices by +0.0054%; FPS and renderer CPU (74.83→74.72% of one core)
+remain effectively unchanged. Instances are 17.76→17.78, blits 21.86→21.72,
+and nominal depth LOAD/STORE area 2.253→2.226 Mpix each. Thus the work is
+close, not identical, and clocks are uncontrolled. This single static pair
+supports the menu candidate but is not a repeated matched racing benchmark
+or an isolated GPU busy/energy measurement.
+
+In A2 there are 21.56 full barriers; B2 uses 4.78 full plus 16.78 scoped,
+retaining 21.56 total. Both use one queue submit per flip. Transfer/streaming
+work remains and accounts for more blits/barriers than the menu. Independently
+bounded VKCUBE counters from 15:49:15.375 to 15:56:08.307, frames
+43800→68100, show +24300 early builds and uses, lazy builds fixed at 2 and
+same-frame fallbacks fixed at 0. This counter span differs from the selected
+GPU5 windows and is not reported as their exact frame coverage.
+
+The PID remains unchanged and the graphics log still contains only its startup
+VKROT selection; there are no presentation rebuilds in these race checks.
+The user's temporal observation and screenshots are useful functional evidence,
+not validation-layer, pixel-equivalence, long-session or pause/resume coverage.
+Profiling-disabled performance, controlled energy/thermal measurements and
+other devices/scales remain unvalidated. No universal shipping default changes.
+
+The Poco is left with pass_barrier=1 for continued experimental play,
+kick=0 and cube_early=1. At 15:59:30 gpu_profile was set to 0 for the next
+manual game launch; cube_profile remains 0. Current PID 12619 retains its
+startup coarse timestamps until restart, which the agent did not perform.
+This does not alter graphics or require another APK. Ordinary play after a
+future restart can check the candidate without GPU timestamp instrumentation;
+that confirmation is still pending.
+
+Raw logs, original/on/return/repeat screenshots, user observation, immutable
+selections, workload/CPU summaries, cube counter spans and the separate
+stationary-comparison.json are in the ignored directory
+performance-results/2026-10-28/poco-pass-barrier-race/.
