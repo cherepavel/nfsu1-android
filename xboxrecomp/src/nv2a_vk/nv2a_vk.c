@@ -3208,15 +3208,44 @@ typedef struct {
 } DynState;
 static DynState s_dyn;
 
+#ifdef __ANDROID__
+#include "nv2a_vk_dynamic_state.h"
+static uint64_t s_android_state_draws, s_android_state_emitted, s_android_state_redundant;
+
+/* Live comparison; both modes count redundant effective values. Disabled
+ * retains the original four commands on every draw. No per-draw clocks. */
+static int android_state_cache_enabled(void)
+{
+    static int enabled = -1;
+    static uint32_t checked;
+    if (enabled < 0 || s_frame - checked >= 300) {
+        char property[PROP_VALUE_MAX] = {0};
+        const char *value = getenv("RECOMP_VK_STATE_CACHE");
+        if (!value && __system_property_get("debug.nfsu.state_cache", property) > 0)
+            value = property;
+        int next = !value || !*value || !strcmp(value, "1");
+        NFS_LOG_INFO("performance", "[VKSTATE] cache=%d next_cache=%d frame=%u draws=%llu requested=%llu emitted=%llu redundant=%llu\n",
+            enabled < 0 ? next : enabled, next, s_frame,
+            (unsigned long long)s_android_state_draws,
+            (unsigned long long)(s_android_state_draws * 4),
+            (unsigned long long)s_android_state_emitted,
+            (unsigned long long)s_android_state_redundant);
+        if (enabled != next) s_dyn_valid = 0;
+        enabled = next;
+        checked = s_frame;
+        s_android_state_draws = s_android_state_emitted = s_android_state_redundant = 0;
+    }
+    return enabled;
+}
+#endif
+
 static void apply_dynamic(const uint32_t *r, int has_depth, VkPrimitiveTopology topo)
 {
 #ifdef __ANDROID__
-    float bc[4];
-    argb_vec4(r[0x34C / 4], bc);
-    vkCmdSetBlendConstants(s_cb, bc);
-    vkCmdSetStencilCompareMask(s_cb, VK_STENCIL_FACE_FRONT_AND_BACK, r[0x36C / 4] & 255);
-    vkCmdSetStencilWriteMask(s_cb, VK_STENCIL_FACE_FRONT_AND_BACK, r[0x360 / 4] & 255);
-    vkCmdSetStencilReference(s_cb, VK_STENCIL_FACE_FRONT_AND_BACK, r[0x368 / 4] & 255);
+    VkDynamicStateWrites writes = android_apply_dynamic(r, android_state_cache_enabled());
+    s_android_state_draws++;
+    s_android_state_emitted += dynamic_state_write_count(writes.emitted);
+    s_android_state_redundant += 4 - dynamic_state_write_count(writes.needed);
     return;
 #endif
     DynState d;
