@@ -1423,9 +1423,14 @@ typedef struct {
     VkSurf  *src[6];
     uint32_t gen[6];
     uint32_t used;
+    uint32_t early_frame, sampled_frame;
+    int early_pending, sampled;
 } VkCube;
 #define VK_MAX_CUBE 4
 static VkCube s_cube[VK_MAX_CUBE];
+static int s_cube_early_preparing;
+static uint32_t s_cube_early_builds, s_cube_lazy_builds, s_cube_early_fallbacks;
+static uint32_t s_cube_early_hits;
 
 static VkImageView cube_from_surfaces(uint32_t va, uint32_t w, uint32_t h, uint32_t face,
                                       VkSurf *faces[6])
@@ -1466,6 +1471,14 @@ static VkImageView cube_from_surfaces(uint32_t va, uint32_t w, uint32_t h, uint3
             NFS_LOG_DEBUG("graphics", "  [VK] " "cube 0x%08X %ux%u from surfaces (stored %u)\n", va, w, h, size);
     }
     c->used = s_frame;
+    if (!s_cube_early_preparing) {
+        c->sampled = 1;
+        c->sampled_frame = s_frame;
+        if (c->early_pending) {
+            s_cube_early_hits++;
+            c->early_pending = 0;
+        }
+    }
     for (f = 0; f < 6; f++) {
         VkSurf *sf = faces[f];
         VkImageBlit bl;
@@ -1496,11 +1509,60 @@ static VkImageView cube_from_surfaces(uint32_t va, uint32_t w, uint32_t h, uint3
         c->gen[f] = sf->gen;
     }
     if (copied) {
+        if (s_cube_early_preparing) {
+            s_cube_early_builds++;
+            c->early_frame = s_frame;
+            c->early_pending = 1;
+        } else {
+            s_cube_lazy_builds++;
+            if (c->early_frame == s_frame && c->early_frame)
+                s_cube_early_fallbacks++;
+        }
         if (c->levels > 1)
             gen_mips(c->image, size, size, c->levels, 6);
         barrier_all();
     }
     return c->view;
+}
+
+/* Car reflections on/off at run time, for a game option (NFSU2: Options ->
+ * Video). Read on the executor thread at every cube stage bind. */
+volatile int nv2a_vk_cube_maps = 1;
+
+#include "nv2a_vk_cube_early.h"
+
+static int cube_early_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *value = getenv("RECOMP_VK_CUBE_EARLY");
+#ifdef __ANDROID__
+        char property[PROP_VALUE_MAX] = {0};
+        if (!value && __system_property_get("debug.nfsu.cube_early", property) > 0)
+            value = property;
+#endif
+        const char *cube = getenv("RECOMP_VK_CUBE");
+        enabled = value && !strcmp(value, "1") && !(cube && *cube == '0');
+        NFS_LOG_INFO("graphics", "[VKCUBE] early assembly=%d\n", enabled);
+    }
+    return enabled;
+}
+
+static void cube_prepare_transition(VkSurf *next)
+{
+    if (!cube_early_enabled() || !nv2a_vk_cube_maps || !s_in_render || s_rt == next)
+        return;
+    /* Capture the old target before assembly ends rendering. No speculative
+     * guest command execution; fallback still checks generations on sampling. */
+    VkSurf *previous = s_rt;
+    for (int i = 0; i < VK_MAX_CUBE; i++) {
+        VkCube *c = &s_cube[i];
+        VkSurf *faces[6];
+        if (!cube_early_faces(c, previous, next, faces)) continue;
+        s_cube_early_preparing = 1;
+        cube_from_surfaces(c->va, c->w, c->h, c->face, faces);
+        s_cube_early_preparing = 0;
+    }
 }
 
 /* Samplers: wrap u, wrap v, mag, min, mipmapped. */
@@ -1564,10 +1626,6 @@ static void rt_scale(uint32_t w, uint32_t h, uint32_t sw, uint32_t sh,
     if (w < lw) scale[0] *= (float)w / (float)lw;
     if (h < lh) scale[1] *= (float)h / (float)lh;
 }
-
-/* Car reflections on/off at run time, for a game option (NFSU2: Options ->
- * Video). Read on the executor thread at every cube stage bind. */
-volatile int nv2a_vk_cube_maps = 1;
 
 /* Stage i: its image view (a surface or a cached texture), sampler and
  * texcoord scale. Records uploads, so call it outside rendering or accept
@@ -3842,6 +3900,10 @@ static void vk_draw_raw_impl(const Nv2aRawBatch *b)
         return;
     s_hz_draws++;
 
+    /* Assemble known reflections at the face -> scene boundary, before the
+     * scene begins. First use and partial/late updates retain the lazy path. */
+    cube_prepare_transition(s);
+
     /* Textures first: uploads end the rendering pass. */
     for (i = 0; i < 4; i++)
         bind_stage(r, (int)i, tscale[i], &img[i], &sampled[i]);
@@ -4541,6 +4603,10 @@ static void vk_flip_impl(void)
     s_frame++;
     if (s_frame % 300 == 0) {
         pool_report();
+        if (cube_early_enabled())
+            NFS_LOG_INFO("graphics", "[VKCUBE] frame=%u early=%u lazy=%u early_used=%u same_frame_fallback=%u\n",
+                s_frame, s_cube_early_builds, s_cube_lazy_builds,
+                s_cube_early_hits, s_cube_early_fallbacks);
         NFS_LOG_DEBUG("graphics", "[vkkick] threshold %d, %u early submits (frame %u)\n",
                 s_kick_n, s_st_kicks, s_frame);
     }
