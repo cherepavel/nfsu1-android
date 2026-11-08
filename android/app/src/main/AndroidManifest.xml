@@ -9,6 +9,13 @@
         android:localeConfig="@xml/locales_config"
         android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher"
         android:allowBackup="false" android:hasFragileUserData="true" android:enableOnBackInvokedCallback="false">
+        <provider android:name=".SaveDocumentsProvider" android:authorities="org.nfsu.android.saves"
+            android:exported="true" android:grantUriPermissions="true"
+            android:permission="android.permission.MANAGE_DOCUMENTS">
+            <intent-filter>
+                <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
+            </intent-filter>
+        </provider>
         <activity android:name=".LauncherActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
