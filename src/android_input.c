@@ -24,8 +24,10 @@ static void touch_state_locked(uint32_t mask)
 {
     if (!touch) return;
     SDL_Joystick *joystick = SDL_GameControllerGetJoystick(touch);
+    /* The retail racing input binds Xbox Back to JOY_EVENT_RESET_CAR (0x99). */
     for (int i = 0; i < SDL_CONTROLLER_BUTTON_MAX; i++) {
         int down = (i == SDL_CONTROLLER_BUTTON_START && (mask & RACE_MENU)) ||
+            (i == SDL_CONTROLLER_BUTTON_BACK && (mask & RACE_RESET)) ||
             (i == SDL_CONTROLLER_BUTTON_RIGHTSHOULDER && (mask & RACE_CAMERA)) ||
             (i == SDL_CONTROLLER_BUTTON_A && (mask & RACE_HANDBRAKE)) ||
             (i == SDL_CONTROLLER_BUTTON_B && (mask & RACE_NITRO)) ||

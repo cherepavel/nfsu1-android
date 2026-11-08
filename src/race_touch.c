@@ -4,12 +4,13 @@
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t held, pending;
-#define CONDITIONAL_BUTTONS (RACE_SHIFT_UP | RACE_SHIFT_DOWN | RACE_NITRO)
-static atomic_uint button_mask = 1023u & ~CONDITIONAL_BUTTONS;
+#define ALWAYS_AVAILABLE_BUTTONS (RACE_MENU | RACE_GAS | RACE_BRAKE | RACE_HANDBRAKE | \
+                                  RACE_LEFT | RACE_RIGHT | RACE_CAMERA | RACE_RESET)
+static atomic_uint button_mask = ALWAYS_AVAILABLE_BUTTONS;
 
 void race_touch_configure_features(int shifting, int nitro)
 {
-    uint32_t mask = 1023u & ~CONDITIONAL_BUTTONS;
+    uint32_t mask = ALWAYS_AVAILABLE_BUTTONS;
     if (shifting) mask |= RACE_SHIFT_UP | RACE_SHIFT_DOWN;
     if (nitro) mask |= RACE_NITRO;
     pthread_mutex_lock(&lock);

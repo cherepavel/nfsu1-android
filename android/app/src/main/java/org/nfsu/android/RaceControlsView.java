@@ -234,6 +234,7 @@ final class RaceControlsView extends View {
         float bottom = h - edge;
         panel(0, edge, edge, 108*s, 38*s);
         panel(9, w - edge - 64*s, edge, 64*s, 50*s);
+        panel(10, edge + 118*s, edge, 64*s, 50*s);
         panel(7, edge, bottom - 78*s, 86*s, 78*s);
         panel(8, edge + 98*s, bottom - 78*s, 86*s, 78*s);
         panel(5, edge, bottom - 174*s, 86*s, 88*s);
