@@ -20,6 +20,7 @@ static const uint32_t feng = 0x12000, package = 0x18000;
 static const uint32_t yes = 0x20000, no = 0x21000;
 static uint32_t expected;
 static uint32_t expected_message = 0x406415E3u;
+static uint32_t backdrop_dispatch_package;
 static int presses, focus_changes, steal_focus, controller_selects;
 static int palette_updates, palette_previews, focus_flushes;
 static int vinyl_color_workflow, invalidate_on_focus, unscoped_hit;
@@ -188,7 +189,13 @@ void sub_000E53C0(void)
 }
 void sub_000D8730_gen(void)
 {
-    assert(g_ecx == feng && MEM32(g_esp + 4) == package);
+    assert(g_ecx == feng);
+    if (backdrop_dispatch_package && MEM32(g_esp + 4) == backdrop_dispatch_package) {
+        assert(!MEM8(feng + 2));
+        g_esp += 8;
+        return;
+    }
+    assert(MEM32(g_esp + 4) == package);
     assert(g_eax == 0x1234 && g_edx == 0x5678);
     assert(g_esi == 0x1111 && g_fp_top == 2 && g_fp_stack[2] == 42);
     if (!MEM32(package + 0x88)) { g_esp += 8; return; }
@@ -224,13 +231,17 @@ void sub_000D8B10_gen(void)
     if (stale_mouse_edge) MEM16(feng + 0x18) = MEM16(feng + 0x1A);
     /* Simulate pad polling/dialog code changing focus after hover. */
     if (steal_focus) MEM32(package + 0x80) = expected == yes ? no : yes;
-    g_esp -= 8;
-    MEM32(g_esp) = 0x12345;
-    MEM32(g_esp + 4) = package;
-    g_ecx = feng; g_eax = 0x1234; g_edx = 0x5678;
-    g_esi = 0x1111; g_fp_top = 2; g_fp_stack[2] = 42;
-    sub_000D8730();
-    assert(g_esp == entry);
+    const uint32_t packages[] = { backdrop_dispatch_package, package };
+    for (unsigned i = 0; i < 2; i++) {
+        if (!packages[i]) continue;
+        g_esp -= 8;
+        MEM32(g_esp) = 0x12345;
+        MEM32(g_esp + 4) = packages[i];
+        g_ecx = feng; g_eax = 0x1234; g_edx = 0x5678;
+        g_esi = 0x1111; g_fp_top = 2; g_fp_stack[2] = 42;
+        sub_000D8730();
+        assert(g_esp == entry);
+    }
     if (unscoped_hit) {
         /* A hit outside package dispatch must not borrow the old slot. */
         g_esp = entry - 16;
@@ -970,6 +981,82 @@ int main(void)
         menu_touch_cancel(); update();
         carousel_layout = 0; draw_bounds();
     }
+    /* The arrows come from a separately registered backdrop that can
+     * precede the trade selector. Only the selector receives the action. */
+    const uint32_t backdrop_reg = 0x37000, backdrop_screen = 0x36000, backdrop_package = 0x38000;
+    MEM32(0x2BCB9C) = backdrop_reg;
+    MEM32(backdrop_reg) = registry;
+    MEM32(backdrop_reg + 0x10) = backdrop_screen;
+    MEM32(backdrop_reg + 0x14) = backdrop_package;
+    MEM32(backdrop_screen) = 0x1FF82C;
+    MEM32(backdrop_package + 0x1C) = 1;
+    backdrop_dispatch_package = backdrop_package;
+    MEM32(screen) = 0x1FBDB0;
+    MEM32(screen + 0xC) = package;
+    MEM32(package + 0x88) = 0;
+    MEM32(yes + 0x10) = 0x543398D3;
+    MEM32(no + 0x10) = 0xDB157AC6;
+    draw_mask = 0; draw_bounds();
+    add_quad(yes, 125, 300, 155, 332);
+    add_quad(no, 485, 300, 515, 332);
+    before_actions = controller_selects;
+    expected_message = 0x9120409E; tap_at(140.0f / 640, .65f, yes);
+    expected_message = 0xB5971BF1; tap_at(500.0f / 640, .65f, no);
+    assert(controller_selects == before_actions + 2);
+
+    /* The car name is rendered independently of the selected logo. */
+    draw_bounds();
+    MEM32(yes + 0x10) = 0xD6D32016;
+    add_quad(yes, 20, 290, 120, 312);
+    expected_message = 0x0C407210;
+    tap_at(.1f, .62f, yes);
+    assert(controller_selects == before_actions + 3);
+
+    /* NEXT_TAG uses the same text-object hash as other menu-bar captions.
+     * Its language key identifies Next, and the icon is a separate target. */
+    draw_bounds();
+    MEM32(yes + 0x18) = 2;
+    MEM32(yes + 0x10) = 0x5B9D88B9;
+    MEM32(yes + 0x5C) = 0x1A705339;
+    MEM32(no + 0x10) = 0x1A705339;
+    add_quad(yes, 490, 420, 590, 445);
+    add_quad(no, 460, 420, 490, 445);
+    tap_at(.85f, .90f, yes);
+    assert(controller_selects == before_actions + 4);
+    MEM32(screen) = 0x200208;
+    MEM32(0x2BE37C) = 1;
+    expected_message = 0x406415E3;
+    tap_at(.85f, .90f, yes);
+    MEM32(0x2BE37C) = 2;
+    tap_at(.74f, .90f, no);
+    assert(controller_selects == before_actions + 6);
+    MEM32(yes + 0x5C) = 0; /* same hash, different caption */
+    tap_at(.85f, .90f, yes);
+    assert(controller_selects == before_actions + 6);
+
+    MEM32(screen) = 0x1FBD4C;
+    MEM32(package + 0x88) = 2;
+    MEM32(yes + 0x10) = 0xB8A7C6CC;
+    MEM32(no + 0x10) = 0xB8A7C6CD;
+    draw_bounds();
+    add_quad(yes, 190, 270, 285, 300);
+    add_quad(no, 355, 270, 450, 300);
+    expected_message = 0x0C407210;
+    tap(.62f, no);
+    assert(controller_selects == before_actions + 7);
+    expected = yes;
+    menu_touch_event(MENU_TOUCH_DOWN, .37f, .60f, 1280, 720); update(); update();
+    assert(controller_selects == before_actions + 7);
+    menu_touch_event(MENU_TOUCH_UP, .58f, .60f, 1280, 720); update(); update();
+    assert(controller_selects == before_actions + 7);
+    tap(.37f, yes);
+    assert(controller_selects == before_actions + 8);
+    MEM32(yes + 0x18) = 0;
+    MEM32(0x2BE37C) = 0;
+    MEM32(0x2BCB9C) = registry;
+    backdrop_dispatch_package = 0;
+    draw_mask = 3;
+
     /* Magazine introduction and subsequent front/back confirmation captions
      * activate through the native controller even without interactive flags. */
     const uint32_t magazine_captions[] = {
