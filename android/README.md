@@ -83,6 +83,19 @@ Xbox paths. Providers that return non-seekable streams are unsupported. Keep
 the selected drive connected while playing. Saves, settings and shader caches
 live under the app's external files directory, separately from the disc data.
 
+## Save files
+
+In Android's system **Files** interface, open the side menu and select
+**NFS Underground**. It exposes the existing `save/UserData/45410047/` folder:
+copy entire profile folders out to back them up, or copy them back to restore.
+Close the game before changing or copying saves. Keep the original folder names;
+if a name already exists, a new copy gets a numbered name instead of overwriting it.
+
+Updates keep the same save path. This is direct file access, so manual changes
+apply immediately and there is no automatic backup. Files copied elsewhere
+survive uninstalling the app; files left inside the app are removed with it.
+Third-party file managers need Storage Access Framework support to see this source.
+
 ## Graphics
 
 The Android Vulkan renderer targets **Vulkan 1.1**, using ordinary render
