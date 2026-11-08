@@ -14,7 +14,8 @@
 #include "usb/usb_gamepad.h"
 
 static uint32_t flow = 6;
-int feng_touch_race_menu_active(void) { return 0; }
+static int race_menu_active;
+int feng_touch_race_menu_active(void) { return race_menu_active; }
 void *xbox_GetMemoryBase(void) { return &flow; }
 ptrdiff_t xbox_GetMemoryOffset(void) { return (ptrdiff_t)(uintptr_t)&flow - 0x00283434u; }
 DWORD GetTickCount(void) { return SDL_GetTicks(); }
@@ -117,6 +118,20 @@ int main(int argc, char **argv)
     assert(!(state[2] & XBOX_GAMEPAD_START));
     report(state);
     assert(state[4 + XBOX_BUTTON_WHITE] == 0);
+    race_touch_set(RACE_GAS | RACE_RESET);
+    race_touch_set(RACE_GAS);
+    report(state);
+    assert(state[2] == XBOX_GAMEPAD_BACK);
+    assert(state[4 + XBOX_BUTTON_RTRIGGER] == 255);
+    report(state);
+    assert(state[2] == 0);
+    race_touch_set(RACE_RESET);
+    race_menu_active = 1;
+    report(state);
+    assert(state[2] == 0 && !race_touch_visible());
+    race_menu_active = 0;
+    report(state);
+    assert(state[2] == 0 && race_touch_visible());
     for (int cycle = 0; cycle < 3; cycle++) {
         race_touch_set(RACE_GAS);
         report(state);
@@ -148,15 +163,17 @@ int main(int argc, char **argv)
         /* Manually enabling sensor+overlay keeps the physical pad live. */
         input_mode_configure(INPUT_SENSOR_ON, 1);
         android_race_controls_poll();
-        race_touch_set(RACE_NITRO);
+        race_touch_set(RACE_NITRO | RACE_RESET);
         report(state);
         assert(state[4 + XBOX_BUTTON_A] == 255); /* physical */
         assert(state[4 + XBOX_BUTTON_B] == 255); /* touch */
+        assert(state[2] & XBOX_GAMEPAD_BACK);
         assert(state[12] == (12345 & 255) && state[13] == (12345 >> 8));
         input_mode_configure(INPUT_SENSOR_ON, 0);
         android_race_controls_poll();
         report(state);
         assert(state[4 + XBOX_BUTTON_A] == 255 && state[4 + XBOX_BUTTON_B] == 0);
+        assert(!(state[2] & XBOX_GAMEPAD_BACK));
         input_mode_configure(INPUT_SENSOR_AUTO, 1);
         detach_pad(pad);
         assert(!android_input_has_controller());
