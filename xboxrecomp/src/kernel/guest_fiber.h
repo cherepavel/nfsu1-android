@@ -34,6 +34,12 @@ typedef enum {
     XGF_PREEMPT_NATIVE, XGF_PREEMPT_STAY, XGF_PREEMPT_YIELD
 } XgfPreemptStatus;
 XgfPreemptStatus xgf_preempt_status(void);
+#ifdef RECOMP_EXECUTOR_TLS_ARG
+/* Internal safe-point entry. executor must be the calling native thread's
+ * current native_executor slot (or NULL); do not cache it across lifecycle
+ * changes or pass an executor borrowed from another thread. */
+XgfPreemptStatus xgf_preempt_status_for_executor(XgfExecutor *executor);
+#endif
 /* Synchronous host call on the pthread's original stack (e.g. ART/JNI).
  * No guest scheduling/context switch occurs. Callback must not park/yield.
  * Zero means already on a native stack; caller executes its normal path. */

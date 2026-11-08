@@ -61,25 +61,9 @@ static void full(void)
     assert(memory.dstAccessMask == (VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT));
     visible();
 }
-int main(void)
-{
-    frame.gpu_queries = (VkQueryPool)(uintptr_t)1;
-    dirty(); barrier_all(); full();
-    assert(calls == 1 && frame.gpu_barriers == 1 && !frame.gpu_pass_barriers);
-    dirty(); barrier_before_rendering(); full(); /* Unset is the original path. */
-    assert(calls == 2 && frame.gpu_barriers == 2 && !frame.gpu_pass_barriers);
 #ifdef __ANDROID__
-    assert(reads == 1);
-    property = "1";
-    s_frame = 299;
-    barrier_before_rendering(); full();
-    assert(reads == 1); /* No property lookup on every pass. */
-    s_frame = 300;
-    dirty(); barrier_before_rendering(); visible();
-    assert(reads == 2 && frame.gpu_barriers == 3 && frame.gpu_pass_barriers == 1);
-    /* The producer scope includes transfers, late depth/stencil stores,
-     * previous command buffers and sampled-image reads (WAR execution).
-     * Neither the fragment nor early/late depth consumer may be omitted. */
+static void scoped(void)
+{
     assert(src_stage == VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
     assert(dst_stage == (VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
         | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT
@@ -88,20 +72,48 @@ int main(void)
     assert(memory.dstAccessMask == (VK_ACCESS_SHADER_READ_BIT
         | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
         | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT));
-    dirty(); barrier_all(); full(); /* Transfers/readback keep their full scope. */
-    assert(frame.gpu_barriers == 4 && frame.gpu_pass_barriers == 1);
-    s_f->gpu_queries = VK_NULL_HANDLE;
-    barrier_before_rendering();
-    assert(frame.gpu_pass_barriers == 1); /* No profiling counters when disabled. */
-    property = "0"; s_frame = 600;
+    visible();
+}
+#endif
+int main(void)
+{
+    frame.gpu_queries = (VkQueryPool)(uintptr_t)1;
+    dirty(); barrier_all(); full();
+    assert(calls == 1 && frame.gpu_barriers == 1 && !frame.gpu_pass_barriers);
+#ifdef __ANDROID__
+    dirty(); barrier_before_rendering(); scoped(); /* Clean-install Android default. */
+    assert(calls == 2 && frame.gpu_barriers == 1 && frame.gpu_pass_barriers == 1);
+    assert(reads == 1);
+    property = "0";
+    s_frame = 299;
+    barrier_before_rendering(); scoped();
+    assert(reads == 1); /* No property lookup on every pass. */
+    s_frame = 300;
     dirty(); barrier_before_rendering(); full();
-    assert(reads == 3);
-    property = "invalid"; s_frame = 900;
-    barrier_before_rendering(); full();
+    assert(reads == 2 && frame.gpu_barriers == 2 && frame.gpu_pass_barriers == 2);
+    property = "1"; s_frame = 600;
+    dirty(); barrier_before_rendering(); scoped();
+    assert(reads == 3 && frame.gpu_barriers == 2 && frame.gpu_pass_barriers == 3);
+    /* The producer scope includes transfers, late depth/stencil stores,
+     * previous command buffers and sampled-image reads (WAR execution).
+     * Neither the fragment nor early/late depth consumer may be omitted. */
+    dirty(); barrier_all(); full(); /* Transfers/readback keep their full scope. */
+    assert(frame.gpu_barriers == 3 && frame.gpu_pass_barriers == 3);
+    s_f->gpu_queries = VK_NULL_HANDLE;
+    barrier_before_rendering(); scoped();
+    assert(frame.gpu_pass_barriers == 3); /* No profiling counters when disabled. */
+    property = "0"; s_frame = 900;
+    dirty(); barrier_before_rendering(); full();
     assert(reads == 4);
-    property = ""; s_frame = 1200;
+    property = "invalid"; s_frame = 1200;
     barrier_before_rendering(); full();
     assert(reads == 5);
+    property = ""; s_frame = 1500;
+    barrier_before_rendering(); scoped();
+    assert(reads == 6); /* Clearing override restores the packaged default. */
+#else
+    dirty(); barrier_before_rendering(); full();
+    assert(calls == 2 && frame.gpu_barriers == 2 && !frame.gpu_pass_barriers);
 #endif
-    puts("Pass barrier: original default, dependency scopes, dirty visibility, live rollback, counters: PASS");
+    puts("Pass barrier: platform defaults, dependency scopes, dirty visibility, live rollback, counters: PASS");
 }

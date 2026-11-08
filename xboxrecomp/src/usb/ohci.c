@@ -37,16 +37,8 @@ extern int  xbox_worker_stack_alloc(void);
 extern void xbox_worker_stack_free(int slot);
 extern uint32_t xbox_GetConnectedInterrupt(uint32_t vector);
 
-/* Declared in the generated runtime; thread-local, so the values below are
- * this thread's and not the guest thread's. */
-#if defined(_MSC_VER)
-#  define OHCI_TLS __declspec(thread)
-#else
-#  define OHCI_TLS __thread
-#endif
-extern OHCI_TLS uint32_t g_eax, g_ecx, g_edx, g_esp;
-extern OHCI_TLS uint32_t g_ebx, g_esi, g_edi;
-extern OHCI_TLS uint32_t g_fs_base;
+/* Register storage comes from kernel.h -> xbox_memory_layout.h. It belongs
+ * to this native thread, including in the grouped TLS experiment. */
 extern uint32_t xbox_AllocThreadTib(void);
 
 /* The vector XPP takes for USB0. HalGetInterruptVector(1) returns 1 here, and

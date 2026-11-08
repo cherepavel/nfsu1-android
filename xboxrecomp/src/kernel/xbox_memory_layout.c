@@ -1,3 +1,6 @@
+#ifndef _WIN32
+#include <errno.h>
+#endif
 /**
  * Xbox Memory Layout Implementation
  *
@@ -1217,6 +1220,8 @@ static void nv2a_thread_pause(int busy)
     } else {
         struct timespec ts;
         unsigned seen;
+        int wait_result = 0;
+        uint64_t perf_idle = nfsu_perf_begin();
         clock_gettime(CLOCK_REALTIME, &ts);
         ts.tv_nsec += 1000000L;
         if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
@@ -1224,10 +1229,14 @@ static void nv2a_thread_pause(int busy)
         seen = s_hw_wakes;
         __atomic_add_fetch(&s_hw_sleepers, 1, __ATOMIC_RELAXED);
         while (seen == s_hw_wakes)
-            if (pthread_cond_timedwait(&s_hw_cond, &s_hw_lock, &ts) != 0)
+            if ((wait_result = pthread_cond_timedwait(&s_hw_cond, &s_hw_lock, &ts)) != 0) {
                 break;
+            }
         __atomic_sub_fetch(&s_hw_sleepers, 1, __ATOMIC_RELAXED);
         pthread_mutex_unlock(&s_hw_lock);
+        nfsu_perf_end(wait_result == ETIMEDOUT ? NFSU_PERF_PB_IDLE_TIMEOUT :
+                      wait_result ? NFSU_PERF_PB_IDLE_ERROR : NFSU_PERF_PB_IDLE_WAKE,
+                      perf_idle);
     }
 #endif
 }
@@ -1489,9 +1498,16 @@ uint32_t g_xbox_code_lo = 0;
 uint32_t g_xbox_code_hi = 0;
 
 /* Global registers for recompiled code (via recomp_types.h) */
+#ifdef RECOMP_REGISTER_BLOCK
+RECOMP_TLS RecompRegisterBlock g_recomp_registers = {
+    .r_fs_base = XBOX_TIB_MAIN, .r_fp_control_word = 0x037f, .r_fp_cc = 0x4000
+};
+#endif
 /* Each guest thread's TIB. The first thread uses the one the loader built;
  * a spawned thread gets its own from xbox_AllocThreadTib(). */
+#ifndef RECOMP_REGISTER_BLOCK
 RECOMP_TLS uint32_t g_fs_base = XBOX_TIB_MAIN;
+#endif
 
 /* The shape of the TLS block the loader built, so a new thread can be
  * given one just like it: where the initialised image data starts, how
@@ -1499,8 +1515,10 @@ RECOMP_TLS uint32_t g_fs_base = XBOX_TIB_MAIN;
  * at is. Zero total means the image had no TLS directory. */
 static uint32_t g_tls_template_va, g_tls_total, g_tls_thread_size = 64;
 
+#ifndef RECOMP_REGISTER_BLOCK
 RECOMP_TLS uint32_t g_eax = 0, g_ecx = 0, g_edx = 0, g_esp = 0;
 RECOMP_TLS uint32_t g_ebx = 0, g_esi = 0, g_edi = 0;
+#endif
 
 #ifdef RECOMP_ABI_CHECK
 /* Report a lifted function that returned without restoring ebx/esi/edi.
@@ -1562,9 +1580,11 @@ void recomp_abi_violation_log(uint32_t va, uint32_t ebx0, uint32_t esi0,
 #endif
 
 /* SEH frame pointer bridge (see recomp_types.h for explanation) */
+#ifndef RECOMP_REGISTER_BLOCK
 RECOMP_TLS uint32_t g_seh_ebp = 0;
 RECOMP_TLS double g_fp_stack[8];
 RECOMP_TLS int g_fp_top = 0;
+#endif
 
 /* Set once at startup. The generated code reads it at the ret of every
  * --force-return function, so it has to be cheap and it has to default to
@@ -1573,13 +1593,13 @@ RECOMP_TLS int g_fp_top = 0;
 int g_force_return = 0;
 /* x87 control and status. The reset default masks every exception and
  * rounds to nearest, which is what the CRT expects before _control87. */
+#ifndef RECOMP_REGISTER_BLOCK
 RECOMP_TLS uint16_t g_fp_control_word = 0x037Fu;
 RECOMP_TLS int g_fp_cmp = 0;
 RECOMP_TLS uint16_t g_fp_cc = 0x4000;
+#endif
 
 /* Defined below, with the other guest registers. */
-extern RECOMP_TLS uint32_t g_ebp;
-extern RECOMP_TLS uint32_t g_eax, g_ecx, g_edx, g_ebx, g_esi, g_edi;
 
 /* Native non-local jump tables are owned by explicit contexts in
  * recomp_context.c. The exported helper ABI used by lifted code is unchanged. */
@@ -2067,13 +2087,17 @@ void xbox_WatchdogStart(void)
 }
 
 /* SSE. 128 bits of architectural state, per-thread like the rest. */
+#ifndef RECOMP_REGISTER_BLOCK
 RECOMP_TLS RecompMmx g_mm0, g_mm1, g_mm2, g_mm3;
 RECOMP_TLS RecompMmx g_mm4, g_mm5, g_mm6, g_mm7;
 RECOMP_TLS RecompXmm g_xmm0, g_xmm1, g_xmm2, g_xmm3;
 RECOMP_TLS RecompXmm g_xmm4, g_xmm5, g_xmm6, g_xmm7;
+#endif
 /* Last frame established by `mov ebp, esp`. Read by frameless functions
  * that address their caller's frame through ebp. */
+#ifndef RECOMP_REGISTER_BLOCK
 RECOMP_TLS uint32_t g_ebp = 0;
+#endif
 
 /* EFLAGS.DF. Zero means the string instructions walk forwards, which is the
  * ABI's resting state and what almost every one of them does -- so this is
@@ -2082,7 +2106,9 @@ RECOMP_TLS uint32_t g_ebp = 0;
  * `std; repne scasb`, and memmove goes backwards when its regions overlap the
  * wrong way. Thread-local, because `std` and the `cld` that undoes it can land
  * in different lifted bodies of the same guest routine. */
+#ifndef RECOMP_REGISTER_BLOCK
 RECOMP_TLS int g_df = 0;
+#endif
 
 /* ICALL trace ring buffer */
 volatile uint32_t g_icall_trace[16] = {0};

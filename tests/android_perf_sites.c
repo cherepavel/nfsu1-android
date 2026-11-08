@@ -60,6 +60,23 @@ int main(void)
     nfsu_perf_poll();
     assert(!perf.resumes.count && !perf.overflow.count);
     for (int i = 0; i < PERF_KERNEL_SITES; i++) assert(!perf.sites[i].count);
+    /* Five-second reporting must not erase the current frame's waits. */
+    uint64_t boundary = perf_clock(CLOCK_MONOTONIC);
+    nfsu_perf_frame(1, boundary);
+    nfsu_perf_add(NFSU_PERF_PB_IDLE_TIMEOUT, 1000000);
+    nfsu_perf_add(NFSU_PERF_VK_FENCE, 2000000);
+    perf.window -= 5000000000ull;
+    nfsu_perf_poll();
+    assert(frame_perf.metrics[NFSU_PERF_PB_IDLE_TIMEOUT].sum == 1000000);
+    assert(frame_perf.metrics[NFSU_PERF_VK_FENCE].sum == 2000000);
+    nfsu_perf_frame(2, boundary + 60000000);
+    assert(!frame_perf.metrics[NFSU_PERF_PB_IDLE_TIMEOUT].count);
+    assert(!frame_perf.metrics[NFSU_PERF_VK_FENCE].count);
+    nfsu_perf_enabled = 0;
+    nfsu_perf_add(NFSU_PERF_PB_IDLE_TIMEOUT, 1000000);
+    nfsu_perf_frame(3, boundary + 120000000);
+    assert(frame_perf.last == boundary + 60000000);
+    assert(!frame_perf.metrics[NFSU_PERF_PB_IDLE_TIMEOUT].count);
     puts("PASS: call-site aggregation, wait delta, TLS isolation, overflow, disabled mode, report reset");
     return 0;
 }
