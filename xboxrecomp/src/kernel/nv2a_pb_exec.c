@@ -24,6 +24,7 @@
  * has not given us any vertices". RECOMP_FB_DUMP=<prefix> writes the surface to
  * <prefix>NNN.bmp, so the result can be looked at without a display.
  */
+#include "../../include/nfsu_perf.h"
 #include "../../include/nfsu_log.h"
 #include <math.h>
 #include <stdio.h>
@@ -38,6 +39,8 @@
 #include "../d3d/d3d8_swizzle.h"
 #include "../d3d/d3d8_dxt.h"
 #include "nv2a_backend.h"
+#include "nv2a_indices.h"
+#include "nv2a_ui_marker.h"
 #ifdef __ANDROID__
 #include "nv2a_fence_wait.h"
 static Nv2aFenceWait s_fence_wait = NV2A_FENCE_WAIT_INITIALIZER;
@@ -453,7 +456,9 @@ int nv2a_pb_wait_semaphore(uint32_t guest_va, uint32_t submitted, uint32_t delta
     if (!guest_va || (guest_va & 3u)
             || guest_va != __atomic_load_n(&s_sem_va, __ATOMIC_ACQUIRE)) return 0;
     uint32_t *word = (uint32_t *)((uint8_t *)xbox_GetMemoryOffset() + guest_va);
+    uint64_t perf_wait = nfsu_perf_begin();
     nv2a_fence_wait(&s_fence_wait, word, submitted, delta, 1000000L);
+    nfsu_perf_end(NFSU_PERF_PB_SEMAPHORE, perf_wait);
     return 1;
 #else
     (void)guest_va; (void)submitted; (void)delta;
@@ -4071,6 +4076,12 @@ static void flip_apply_retired(void)
 void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
 {
     static int inited;
+    int ui_begin;
+    if (nv2a_ui_marker(subch, method, param, &ui_begin)) {
+        if (!s_gpu.prim && s_backend && s_backend->ui_phase)
+            s_backend->ui_phase(ui_begin);
+        return;
+    }
 
     /* The shadow is the 3D class's register file: methods to the other
      * subchannels (2D surfaces, blits) share its offsets and must not land
@@ -4561,10 +4572,8 @@ uint32_t nv2a_pb_exec_run(uint32_t subch, uint32_t method, int noninc,
             s_reg_dirty[w >> 4] = 1;
         }
         if (s_gpu.prim)
-            for (i = 0; i < count && s_gpu.idx_count + 2 <= NV_MAX_INDICES; i++) {
-                s_gpu.idx[s_gpu.idx_count++] = (uint16_t)(p[i] & 0xFFFF);
-                s_gpu.idx[s_gpu.idx_count++] = (uint16_t)(p[i] >> 16);
-            }
+            s_gpu.idx_count = nv2a_append_indices16(s_gpu.idx, s_gpu.idx_count,
+                                                   NV_MAX_INDICES, p, count);
         return count;
     }
     if (!noninc && method >= NV097_SET_TRANSFORM_CONSTANT

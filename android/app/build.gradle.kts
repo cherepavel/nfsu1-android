@@ -16,7 +16,18 @@ val xbe = providers.gradleProperty("nfsu.xbe")
     .orElse(provider { localSettings.getProperty("nfsu.xbe", "game/Need For Speed Underground/default.xbe") })
     .map { repository.resolve(it) }
 // Keep compiler experiments reproducible through the normal Gradle entry point.
-val generatedOptimization = providers.gradleProperty("nfsu.genOpt").orElse("-O1")
+val generatedOptimization = providers.gradleProperty("nfsu.genOpt").orElse("-O2")
+val registerBlock = providers.gradleProperty("nfsu.registerBlock").orElse("false")
+val executorTlsArg = providers.gradleProperty("nfsu.executorTlsArg").orElse("false")
+require(executorTlsArg.get() in listOf("true", "false")) {
+    "nfsu.executorTlsArg must be true or false"
+}
+require(executorTlsArg.get() != "true" || registerBlock.get() == "true") {
+    "nfsu.executorTlsArg=true requires nfsu.registerBlock=true"
+}
+require(registerBlock.get() in listOf("true", "false")) {
+    "nfsu.registerBlock must be true or false"
+}
 require(generatedOptimization.get() in listOf("-O1", "-O2", "-O3")) {
     "nfsu.genOpt must be -O1, -O2 or -O3"
 }
@@ -48,6 +59,7 @@ val generateRecomp = tasks.register("generateRecomp") {
     inputs.file(repository.resolve("config/seed_functions.json"))
     inputs.file(repository.resolve("src/recomp_manual.c"))
     inputs.file(repository.resolve("xboxrecomp/templates/runtime/recomp_types.h"))
+    inputs.file(repository.resolve("xboxrecomp/templates/runtime/recomp_registers.h"))
     inputs.files(fileTree(repository.resolve("xboxrecomp/tools")) {
         include("**/*.py", "**/*.json", "**/*.toml", "**/*.yaml")
         exclude("**/output/**", "**/__pycache__/**")
@@ -134,6 +146,8 @@ android {
         externalNativeBuild {
             cmake {
                 arguments += listOf("-DNFSU2_VULKAN=ON", "-DANDROID_STL=c++_shared",
+                    "-DNFSU2_REGISTER_BLOCK=${if (registerBlock.get() == "true") "ON" else "OFF"}",
+                    "-DNFSU2_EXECUTOR_TLS_ARG=${if (executorTlsArg.get() == "true") "ON" else "OFF"}",
                     "-DNFSU2_GEN_DIR=${generatedCode.get().asFile.absolutePath}",
                     "-DNFSU2_GEN_OPT=${generatedOptimization.get()}")
                 targets += listOf("nfsu2_recomp", "SDL2")

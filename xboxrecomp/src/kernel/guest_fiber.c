@@ -73,7 +73,11 @@ struct XgfFiber {
     int detached;
     XgfFiber *next;
 };
+#ifdef RECOMP_EXECUTOR_TLS_ARG
+#define running (g_recomp_registers.native_executor)
+#else
 static RECOMP_TLS XgfExecutor *running;
+#endif
 static RECOMP_TLS unsigned owner_anchor;
 static uintptr_t owner_id(void) { return (uintptr_t)&owner_anchor; }
 static uint64_t monotonic_ms(void);
@@ -418,35 +422,42 @@ static void import_submissions(XgfExecutor *e)
     }
 }
 
-static int fiber_should_preempt(XgfFiber *self)
+/* Keep list/mutex work out of the cached safe-point path. The generation
+ * snapshot is still taken before refresh, exactly as before: a concurrent
+ * publication forces another refresh at the next safe point. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline, cold))
+#endif
+static void fiber_refresh_preempt(XgfFiber *self, uint64_t generation)
+{
+    XgfExecutor *e = self->executor;
+    pthread_mutex_lock(&e->wake_lock);
+    int higher = e->submissions != NULL;
+    pthread_mutex_unlock(&e->wake_lock);
+    int equal = 0, priority = xgf_priority(self);
+    for (XgfFiber *f = e->list; f; f = f->next) {
+        if (f == self || __atomic_load_n(&f->suspended, __ATOMIC_ACQUIRE)) continue;
+        XgfState state = xgf_state(f);
+        if (state != XGF_NEW && state != XGF_SUSPENDED) continue;
+        int other_priority = xgf_priority(f);
+        if (other_priority > priority) higher = 1;
+        if (other_priority == priority) equal = 1;
+    }
+    self->preempt_higher = higher;
+    self->preempt_equal = equal;
+    self->preempt_generation = generation;
+    self->preempt_valid = 1;
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((always_inline))
+#endif
+static inline int fiber_should_preempt(XgfFiber *self)
 {
     if (__atomic_load_n(&self->suspended, __ATOMIC_ACQUIRE)) return 1;
-    XgfExecutor *e = self->executor;
-    /* Only the owner changes the list. Native notifications, priority changes
-     * and suspend/resume publish a generation after updating their metadata.
-     * Cache the competitor classification until that generation changes; a
-     * quiet safe point needs neither a mutex/list walk nor a clock read when
-     * there is no equal-priority competitor. Never clear a native notification.
-     */
-    uint64_t generation = __atomic_load_n(&e->ready_generation, __ATOMIC_ACQUIRE);
-    if (!self->preempt_valid || self->preempt_generation != generation) {
-        pthread_mutex_lock(&e->wake_lock);
-        int higher = e->submissions != NULL;
-        pthread_mutex_unlock(&e->wake_lock);
-        int equal = 0, priority = xgf_priority(self);
-        for (XgfFiber *f = e->list; f; f = f->next) {
-            if (f == self || __atomic_load_n(&f->suspended, __ATOMIC_ACQUIRE)) continue;
-            XgfState state = xgf_state(f);
-            if (state != XGF_NEW && state != XGF_SUSPENDED) continue;
-            int other_priority = xgf_priority(f);
-            if (other_priority > priority) higher = 1;
-            if (other_priority == priority) equal = 1;
-        }
-        self->preempt_higher = higher;
-        self->preempt_equal = equal;
-        self->preempt_generation = generation;
-        self->preempt_valid = 1;
-    }
+    uint64_t generation = __atomic_load_n(&self->executor->ready_generation, __ATOMIC_ACQUIRE);
+    if (!self->preempt_valid || self->preempt_generation != generation)
+        fiber_refresh_preempt(self, generation);
     return self->preempt_higher ||
         (self->preempt_equal && monotonic_ms() > self->slice_start);
 }
@@ -457,19 +468,32 @@ int xgf_should_preempt(void)
     return self && !running->on_native_callback && fiber_should_preempt(self);
 }
 
-XgfPreemptStatus xgf_preempt_status(void)
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((always_inline))
+#endif
+static inline XgfPreemptStatus fiber_preempt_status(XgfExecutor *e)
 {
-    XgfExecutor *e = running;
     if (!e || !e->active) return XGF_PREEMPT_NATIVE;
     XgfFiber *self = e->active;
     /* This is the active guest context even during a native-stack callback.
-     * Read it directly: generated safe points need only one out-of-line call,
-     * rather than reloading TLS through the bridge and dispatch helpers. */
+     * Read it directly instead of resolving current-context TLS or asking
+     * separate bridge/dispatch helpers for each guard. */
     const RecompKernelState *k = &self->context.kernel;
     if (e->on_native_callback || k->gil_depth <= 0 || k->gil_nopreempt || k->dispatch_held)
         return XGF_PREEMPT_STAY;
     return fiber_should_preempt(self) ? XGF_PREEMPT_YIELD : XGF_PREEMPT_STAY;
 }
+
+XgfPreemptStatus xgf_preempt_status(void)
+{
+    return fiber_preempt_status(running);
+}
+#ifdef RECOMP_EXECUTOR_TLS_ARG
+XgfPreemptStatus xgf_preempt_status_for_executor(XgfExecutor *e)
+{
+    return fiber_preempt_status(e);
+}
+#endif
 
 XgfRunResult xgf_executor_run(XgfExecutor *e, uint32_t budget_ms, XgfPoll poll)
 {

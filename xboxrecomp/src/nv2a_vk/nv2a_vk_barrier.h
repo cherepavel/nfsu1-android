@@ -20,7 +20,8 @@ static int scoped_pass_barrier_enabled(void)
     if (enabled < 0 || s_frame - checked >= 300) {
         char property[PROP_VALUE_MAX] = {0};
         __system_property_get("debug.nfsu.pass_barrier", property);
-        int next = !strcmp(property, "1");
+        /* Packaged Android RC default; 0/invalid still provide live rollback. */
+        int next = !*property || !strcmp(property, "1");
         if (next != enabled)
             NFS_LOG_INFO("performance", "[VKBARRIER] scoped_pass=%d frame=%u\n", next, s_frame);
         enabled = next;

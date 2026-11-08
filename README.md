@@ -48,7 +48,7 @@ If `nfsu.xbe` is omitted, Gradle uses
 Then build:
 
 ```sh
-./gradlew assembleDebug
+./gradlew assembleDebug -Pnfsu.registerBlock=true -Pnfsu.executorTlsArg=true
 ```
 
 Gradle creates its own Python virtual environment, installs the pinned generator
@@ -61,6 +61,10 @@ Use `-Pnfsu.xbe=/path/to/default.xbe` to override the executable for one build,
 and `-Pnfsu.python=/path/to/python3` to choose a Python interpreter.
 
 The APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`.
+The current RC enables the runtime executor, Vulkan state cache, early reflection
+assembly and scoped pass barriers without ADB setup. CPU/GPU profiling and the
+output-resolution UI experiment are off by default. See the
+[RC configuration](docs/android-rc-build.md) for defaults and rollback options.
 To install it on a connected device with USB debugging enabled:
 
 ```sh

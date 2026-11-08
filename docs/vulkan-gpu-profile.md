@@ -5,6 +5,12 @@ Other platforms accept `RECOMP_VK_GPU_PROFILE=1`. Disabled by default.
 The selected graphics queue must support timestamps. `[GPU]` reports support
 and `[GPU5]` reports five-second aggregates of completed frames.
 
+The Android RC also disables CPU PERF5 counters during ordinary play. For a
+comparison that needs CPU counters, set `debug.nfsu.perf=1` before restarting;
+GPU profiling has its own independent switch. Detailed diagnostics can enable
+CPU counters by default, while explicit perf=0 still overrides that selection.
+Earlier dated captures used their recorded instrumentation settings.
+
 - `game_ms`: GPU queue interval from frame start to completed guest rendering,
   including uploads, mip generation, reflection assembly and barriers.
 - `present_ms`: subsequent interval through final FXAA/blit and layout transition.
@@ -61,6 +67,62 @@ are reported as overflow time. Final FXAA is covered by `present_ms` rather
 than the guest target table. Pass intervals exclude the global barrier before
 the pass and work recorded between passes. Timestamp commands can perturb
 execution, so do not equate these sums with an uninstrumented frame time.
+
+## Optional reflection assembly breakdown
+
+Startup `debug.nfsu.cube_profile=1`, or `RECOMP_VK_CUBE_PROFILE=1`, adds three
+timestamps per actual cubemap rebuild. It requires detailed gpu_profile=1;
+coarse mode 2 and mode 0 never record these timestamps. Unset/empty/other
+values disable it. The environment variable takes precedence. Normal detailed
+profiling retains its original 131-query range; enabling this diagnostic
+extends it to 155. No graphics or rendering policy changes are made.
+
+Three bottom-of-pipe timestamps are recorded outside rendering: after ending
+the preceding pass but before the producer barrier; after all changed face
+blits; after mip generation and the final visibility barrier. The first span
+therefore includes the producer dependency and face copies, while the second
+includes mip blits and their dependencies. The preceding rendering/STORE and
+first-use image creation/initialization are excluded. Deferred face clears
+materialized between face blits can enter the first span when lazy_clear=1.
+This is a queue timing breakdown, not isolated DMA bandwidth or DRAM traffic.
+
+`[GPUCUBE]` accompanies the same completed-frame window as GPU5:
+
+- `copy_ms`, `mip_ms`, `total_ms`: sums normalized per completed frame,
+  including frames without a rebuild. These are subsets of game_ms; do not
+  add them to it. They are not per-build averages.
+- `builds_per_frame`, `timed_per_frame`: actual rebuilds and successfully
+  measured rebuilds per frame.
+- `faces_per_frame`: face blit commands for rendered cubemaps only.
+- `mip_blits_per_frame`: their mip blit commands, each possibly spanning all
+  six layers. Ordinary texture mip generation is excluded.
+- `missing`: absolute count of unfinished/unavailable measurement groups.
+- `overflow`: absolute count of rebuilds beyond the eight-per-frame capacity.
+
+Copy and mip timing covers at most eight rebuilds per frame. Overflow keeps
+rendering and command counts unchanged, but omits those timing groups. Read
+queries only after the existing frame fence, with no WAIT flag or extra
+submissions. Three-query groups use indices after the pass range; unfinished
+groups cannot read stale results. Reset follows the existing frame-fence
+lifetime, and early submissions/ring flushes retain the pool and counters.
+Require missing=overflow=0 and matching timed/build counts before using the
+sum as complete reflection-assembly coverage.
+
+The extra timestamps can perturb execution. Keep this flag fixed between
+comparisons and reconfirm any optimization with it disabled. This diagnostic
+does not establish a speedup. Production-helper mock tests cover modes,
+disjoint ranges, overflow, partial/unavailable groups, timestamp wrap and
+reset/reuse; host ASan/UBSan and Android syntax checks pass. APK assembly and
+installation are performed by the user.
+
+The installed diagnostic was checked on Poco 24095PCADG in the Camera menu
+on 28 October 2026, at 100% scale, with early assembly enabled. Eleven complete
+GPU5/GPUCUBE windows contain 3300 frames and one measured build per frame,
+six face blits and seven mip blits, with no missing/overflow groups. Copy and
+mip intervals average 0.0507 and 0.1256 ms per completed frame. This validates
+steady menu query coverage on this driver; it does not validate other devices,
+scales, racing or lifecycle transitions. See the exact selection and limitations
+in [the Poco investigation](poco-gpu-menu.md#reflection-copy-and-mip-timing).
 
 ## ASUS Adreno 650 observation, 2026-10-19
 

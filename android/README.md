@@ -23,7 +23,7 @@ nfsu.xbe=/path/to/Need For Speed Underground/default.xbe
 Build from the repository root, or open the root directory in Android Studio:
 
 ```sh
-./gradlew assembleDebug
+./gradlew assembleDebug -Pnfsu.registerBlock=true -Pnfsu.executorTlsArg=true
 ```
 
 Gradle installs Python dependencies in its own virtual environment, runs the
@@ -31,10 +31,16 @@ recompilation pipeline, and builds the APK. The default XBE location is
 `game/Need For Speed Underground/default.xbe` relative to the repository root.
 Override it with `-Pnfsu.xbe=/path/to/default.xbe`; use
 `-Pnfsu.python=/path/to/python3` for a different Python interpreter.
+Android lifted code defaults to `-O2`, with FP contraction disabled. Use
+`-Pnfsu.genOpt=-O1` for a compiler return/repeat comparison. CPU-heavy audio
+voice processing and final mixdown also use `-O2` in Debug builds.
 Generation tracks its inputs and writes under `android/app/build/`, so `clean` removes
 all generated Android sources. No game data is packaged in the APK.
 
 Output: `android/app/build/outputs/apk/debug/app-debug.apk`.
+The current packaged RC defaults are documented in
+[Android RC build](../docs/android-rc-build.md); the optimized startup modes
+do not require ADB properties on users' devices.
 
 ## Experimental menu touch
 

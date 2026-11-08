@@ -352,7 +352,6 @@ static HANDLE xbox_cs_continuation_mutex(CRITICAL_SECTION *cs)
  * pointer does not. */
 extern ptrdiff_t g_xbox_mem_offset;
 
-extern RECOMP_TLS uint32_t g_esp;
 extern uint32_t g_xbox_code_lo, g_xbox_code_hi;
 
 /* A guest backtrace, printed where the guest is standing.
