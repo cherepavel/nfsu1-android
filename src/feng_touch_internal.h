@@ -42,6 +42,7 @@ uint32_t touch_name_hash(const char *name);
 int touch_object_bounds(uint32_t object, TouchBounds *out, unsigned depth);
 uint32_t touch_rendered_object(uint32_t hash);
 uint32_t touch_rendered_named_hit(uint32_t hash);
+uint32_t touch_trade_next_hit(void);
 uint32_t touch_browser_arrow(uint32_t *message);
 uint32_t touch_carousel_screen(void);
 int touch_carousel_strip(uint32_t screen, float x, float y);

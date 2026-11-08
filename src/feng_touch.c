@@ -247,7 +247,11 @@ uint32_t touch_active_screen(void)
         uint32_t package = MEM32(reg - 4 + 0x18);
         uint32_t screen = MEM32(reg - 4 + 0x14);
         if (touch_guest_range(package, 0x20) && touch_guest_range(screen, 4) && (MEM32(package + 0x1C) & 1)) {
-            if (MEM32(screen) != 0x001FBBC8u) return screen;
+            uint32_t type = MEM32(screen);
+            /* The shared browser backdrop draws arrows for the foreground
+             * browser. Its own input handler (666F0) does nothing. */
+            if (type == 0x001FF82Cu) continue;
+            if (type != 0x001FBBC8u) return screen;
             /* Pause options leaves its selector visible behind the child. */
             uint32_t child_reg = MEM32(0x002BCB9Cu);
             for (unsigned c = 0; touch_guest_range(child_reg, 0x18) && child_reg != 0x002BCB9Cu && c < 64;
@@ -272,6 +276,22 @@ uint32_t touch_rendered_named_hit(uint32_t hash)
         if (MEM32(object + 0x10) == hash &&
             x >= bounds->left && x < bounds->right &&
             y >= bounds->top && y < bounds->bottom) return object;
+    }
+    return 0;
+}
+
+uint32_t touch_trade_next_hit(void)
+{
+    /* The same menu bar serves TradeCareerCar and PerformanceStats.
+     * The text hash is shared with other captions, so check its language key. */
+    float x = s_touch_x + 320.0f, y = s_touch_y + 240.0f;
+    for (unsigned i = 0; i < s_touch_bounds_count; i++) {
+        const TouchBounds *bounds = &s_touch_bounds[i];
+        uint32_t object = bounds->object;
+        uint32_t hash = MEM32(object + 0x10);
+        if (hash != 0x1A705339u && (hash != 0x5B9D88B9u ||
+            MEM32(object + 0x18) != 2 || MEM32(object + 0x5C) != 0x1A705339u)) continue;
+        if (touch_bounds_contains(bounds, x, y)) return object;
     }
     return 0;
 }
@@ -403,11 +423,39 @@ static int touch_quick_race_options(uint32_t screen, TouchTarget *target)
  * The controller-layout screen uses one unnumbered data field instead. */
 static uint32_t s_difficulty_screen, s_difficulty_choice;
 
+static int touch_selection_bounds(uint32_t object, uint32_t package, TouchBounds *area);
+
 static int touch_screen_control(uint32_t screen, uint32_t objects, uint32_t count,
                                 TouchTarget *target)
 {
     if (screen != touch_active_screen()) return 0;
     uint32_t type = MEM32(screen);
+    if (type == 0x00200208u && MEM32(0x002BE37Cu)) {
+        /* EF300 advances from the current car's stats to the candidate's
+         * stats, then opens the trade confirmation. */
+        uint32_t object = touch_trade_next_hit();
+        if (object) {
+            target->target = object;
+            target->message = 0x406415E3u;
+            return 1;
+        }
+    }
+    if (type == 0x001FBD4Cu) {
+        /* B7020 needs the actual Yes or No object to identify the choice. */
+        float x = s_touch_x + 320.0f, y = s_touch_y + 240.0f;
+        for (unsigned i = 0; i < count; i++) {
+            uint32_t object = MEM32(objects + i * 4);
+            if (!object) continue;
+            uint32_t hash = MEM32(object + 0x10);
+            TouchBounds bounds;
+            if ((hash != 0xB8A7C6CCu && hash != 0xB8A7C6CDu) ||
+                !touch_selection_bounds(object, target->package, &bounds) ||
+                !touch_bounds_contains(&bounds, x, y)) continue;
+            target->target = object;
+            target->message = 0x0C407210u;
+            return 1;
+        }
+    }
     if (type == 0x001FE45Cu || type == 0x00200A68u) {
         /* Color Vinyl and decal Black/White footers invoke native X.
          * F5600 toggles the decal color and refreshes its label/preview. */
@@ -637,26 +685,20 @@ static int touch_screen_control(uint32_t screen, uint32_t objects, uint32_t coun
  * registered ahead of it takes ownership and disables camera touch. */
 uint32_t touch_preview_screen(void)
 {
-    uint32_t reg = MEM32(0x002BCB9Cu);
-    for (unsigned n = 0; touch_guest_range(reg, 0x18) && reg != 0x002BCB9Cu && n < 64; n++, reg = MEM32(reg)) {
-        uint32_t package = MEM32(reg - 4 + 0x18);
-        uint32_t screen = MEM32(reg - 4 + 0x14);
-        if (!touch_guest_range(package, 0x20) || !touch_guest_range(screen, 0x4C) || !(MEM32(package + 0x1C) & 1)) continue;
-        uint32_t vtable = MEM32(screen);
-        uint32_t handler = touch_guest_range(vtable, 8) ? MEM32(vtable + 4) : 0;
-        if (vtable == 0x001FDD74u || vtable == 0x001FB8F4u ||
-            vtable == 0x001FC1ACu || vtable == 0x001FBFCCu ||
-            vtable == 0x001FBDB0u ||
-            vtable == 0x001FC26Cu || vtable == 0x001FC278u ||
-            vtable == 0x001FC2BCu || vtable == 0x001FE45Cu ||
-            vtable == 0x001FE630u || vtable == 0x001FE790u ||
-            vtable == 0x001FE7BCu)
-            return screen; /* ColorPicker, QuickRaceCarSelect, MainMenuCarCustomize,
-                            * ChooseCareerCarScreen, UndergroundTradeCarScreen */
-        return handler >= 0x000EB000u && handler < 0x000F7000u &&
-            MEM32(screen + 0x48) == 0x001FF870u ? screen : 0;
-    }
-    return 0;
+    uint32_t screen = touch_active_screen();
+    if (!touch_guest_range(screen, 0x4C)) return 0;
+    uint32_t vtable = MEM32(screen);
+    if (vtable == 0x001FDD74u || vtable == 0x001FB8F4u ||
+        vtable == 0x001FC1ACu || vtable == 0x001FBFCCu ||
+        vtable == 0x001FBDB0u ||
+        vtable == 0x001FC26Cu || vtable == 0x001FC278u ||
+        vtable == 0x001FC2BCu || vtable == 0x001FE45Cu ||
+        vtable == 0x001FE630u || vtable == 0x001FE790u ||
+        vtable == 0x001FE7BCu)
+        return screen;
+    uint32_t handler = touch_guest_range(vtable, 8) ? MEM32(vtable + 4) : 0;
+    return handler >= 0x000EB000u && handler < 0x000F7000u &&
+        MEM32(screen + 0x48) == 0x001FF870u ? screen : 0;
 }
 static RECOMP_TLS TouchOrbit s_touch_orbit;
 
@@ -878,6 +920,13 @@ static void touch_dispatch_snapshot(void)
     uint32_t feng = ecx, package = MEM32(esp + 4);
     uint32_t objects = MEM32(package + 0x84), count = MEM32(package + 0x88);
     int active = s_touch_poll && (MEM32(package + 0x1C) & 1);
+    uint32_t type = s_touch_snapshot->screen_type;
+    if (active && (type == 0x001FBDB0u || type == 0x001FBD4Cu ||
+        (type == 0x00200208u && MEM32(0x002BE37Cu))) &&
+        package != MEM32(s_touch_snapshot->screen + 0xC)) {
+        esp += 8;
+        return; /* The foreground trade screen receives input for shared arrows. */
+    }
     int interactive = active && objects && count && count <= 4096;
     unsigned slot;
     for (slot = 0; slot < s_touch_target_count; slot++)
