@@ -24,6 +24,18 @@ static uint32_t backdrop_dispatch_package;
 static int presses, focus_changes, steal_focus, controller_selects;
 static int palette_updates, palette_previews, focus_flushes;
 static int vinyl_color_workflow, invalidate_on_focus, unscoped_hit;
+static int trade_footer_allocation;
+void sub_000DC410(void)
+{
+    uint32_t object = MEM32(g_esp + 4), text = MEM32(g_esp + 8);
+    assert(object == yes || object == no);
+    uint32_t owned = object == yes ? 0x3D000 : 0x3D040;
+    const char *source = (const char *)XBOX_PTR(text);
+    for (unsigned j = 0; j <= strlen(source); j++) MEM16(owned + j * 2) = source[j];
+    MEM32(object + 0x60) = owned; /* native setter owns a separate allocation */
+    MEM32(object + 0x1C) |= 2;
+    g_esp += 4; /* cdecl */
+}
 static unsigned draw_mask = 3;
 static int keyboard_layout, stale_mouse_edge, carousel_layout;
 void sub_000D8B10(void);
@@ -155,7 +167,7 @@ void sub_000DE540(void)
 }
 uint32_t xbox_ContiguousAlloc(uint32_t size, uint32_t alignment)
 {
-    (void)size; (void)alignment;
+    if (trade_footer_allocation && size == 64 && alignment == 16) return 0x3C000;
     assert(!"unexpected options text allocation");
     return 0;
 }
@@ -981,6 +993,87 @@ int main(void)
         menu_touch_cancel(); update();
         carousel_layout = 0; draw_bounds();
     }
+    /* Car browsers must retain the shared gesture strip when the selected
+     * thumbnail has no rendered quad. Trade uses thumb/master_thumb, while
+     * QR and the garages use other templates. Visible arrows still anchor
+     * the strip, including the space below a smaller selected logo. */
+    const uint32_t car_browsers[] = { 0x1FC1AC, 0x1FC384, 0x1FB8F4, 0x1FBDB0 };
+    for (unsigned i = 0; i < sizeof(car_browsers) / sizeof(car_browsers[0]); i++) {
+        MEM32(screen) = car_browsers[i];
+        MEM32(screen + 0x48) = 0x1FF870;
+        uint32_t cursor = screen + (i == 2 ? 0x58 : 0x54);
+        MEM32(cursor) = 0x2E400;
+        MEM32(0x2E40C) = 0x39000; /* selected object is not drawn */
+        MEM32(package + 0x88) = 0;
+        MEM32(yes + 0x10) = 0x543398D3;
+        MEM32(no + 0x10) = 0xDB157AC6;
+        draw_mask = 0; draw_bounds();
+        add_quad(yes, 125, 300, 155, 332);
+        add_quad(no, 485, 300, 515, 332);
+        for (unsigned selected_drawn = 0; selected_drawn < 2; selected_drawn++) {
+            if (selected_drawn) add_quad(0x39000, 280, 25, 320, 65);
+            before_actions = controller_selects;
+            tap_at(.5f, .65f, yes); /* gap: never confirm the old selection */
+            assert(controller_selects == before_actions);
+            yaw = MEMF(0x2C044);
+            expected = selected_drawn ? 0x39000 : yes;
+            expected_message = 0xB5971BF1;
+            menu_touch_event(MENU_TOUCH_DOWN, .5f, .65f, 1280, 720); update(); update();
+            menu_touch_event(MENU_TOUCH_MOVE, .4f, .65f, 1280, 720); update();
+            assert(controller_selects == before_actions && MEMF(0x2C044) == yaw);
+            menu_touch_event(MENU_TOUCH_UP, .4f, .65f, 1280, 720); update(); update();
+            assert(controller_selects == before_actions + 1 && MEMF(0x2C044) == yaw);
+            expected_message = 0x9120409E;
+            menu_touch_event(MENU_TOUCH_DOWN, .4f, .65f, 1280, 720); update(); update();
+            menu_touch_event(MENU_TOUCH_UP, .5f, .65f, 1280, 720); update(); update();
+            assert(controller_selects == before_actions + 2);
+            /* Camera below the visible strip; crossing it freezes and
+             * re-entry reanchors, exactly as in the garage. */
+            menu_touch_event(MENU_TOUCH_DOWN, .5f, .8f, 1280, 720); update(); update();
+            menu_touch_event(MENU_TOUCH_MOVE, .52f, .8f, 1280, 720); update();
+            float orbit_yaw = MEMF(0x2C044), orbit_pitch = MEMF(0x2C040);
+            assert(fabsf(orbit_yaw - yaw - 3.6f) < .001f);
+            menu_touch_event(MENU_TOUCH_MOVE, .6f, .65f, 1280, 720); update();
+            assert(MEMF(0x2C044) == orbit_yaw && MEMF(0x2C040) == orbit_pitch);
+            menu_touch_event(MENU_TOUCH_MOVE, .6f, .8f, 1280, 720); update();
+            assert(MEMF(0x2C044) == orbit_yaw && MEMF(0x2C040) == orbit_pitch);
+            menu_touch_cancel(); update();
+        }
+        /* Without any rendered strip anchors, no old bounds may survive. */
+        draw_bounds();
+        before_actions = controller_selects;
+        yaw = MEMF(0x2C044);
+        menu_touch_event(MENU_TOUCH_DOWN, .5f, .65f, 1280, 720); update(); update();
+        menu_touch_event(MENU_TOUCH_MOVE, .52f, .65f, 1280, 720); update();
+        assert(fabsf(MEMF(0x2C044) - yaw - 3.6f) < .001f);
+        MEM32(screen) = 0x1FC078; /* transition cancels the held gesture */
+        menu_touch_event(MENU_TOUCH_UP, .4f, .65f, 1280, 720); update(); update();
+        assert(controller_selects == before_actions);
+    }
+    /* The trade caption alone also anchors the shared strip. It can be
+     * visible while the thumbnail and blinking arrows have no cached quad. */
+    MEM32(screen) = 0x1FBDB0;
+    MEM32(yes + 0x10) = 0xD6D32016;
+    draw_bounds(); add_quad(yes, 240, 290, 400, 312);
+    before_actions = controller_selects;
+    expected_message = 0x0C407210;
+    tap_at(.5f, .62f, yes);
+    assert(controller_selects == before_actions + 1);
+    expected_message = 0xB5971BF1;
+    expected = yes;
+    menu_touch_event(MENU_TOUCH_DOWN, .7f, .62f, 1280, 720); update(); update();
+    menu_touch_event(MENU_TOUCH_UP, .6f, .62f, 1280, 720); update(); update();
+    assert(controller_selects == before_actions + 2);
+    /* A browser that has not populated its cursor yet must not acquire
+     * gap swipes from captions alone (e.g. reward introduction panels). */
+    MEM32(screen + 0x54) = 0;
+    menu_touch_event(MENU_TOUCH_DOWN, .7f, .62f, 1280, 720); update(); update();
+    menu_touch_event(MENU_TOUCH_UP, .6f, .62f, 1280, 720); update(); update();
+    assert(controller_selects == before_actions + 2);
+    MEM32(screen + 0x54) = 0x2E400;
+    MEM32(0x2E40C) = no;
+    draw_mask = 3;
+    MEM32(package + 0x88) = 2;
     /* The arrows come from a separately registered backdrop that can
      * precede the trade selector. Only the selector receives the action. */
     const uint32_t backdrop_reg = 0x37000, backdrop_screen = 0x36000, backdrop_package = 0x38000;
@@ -992,7 +1085,11 @@ int main(void)
     MEM32(backdrop_package + 0x1C) = 1;
     backdrop_dispatch_package = backdrop_package;
     MEM32(screen) = 0x1FBDB0;
-    MEM32(screen + 0xC) = package;
+    /* Observed on device: screen +0C is the FNG name. The live package
+     * comes from registry +14. Comparing it with +0C drops ALL car controls
+     * while the independent camera-orbit path continues to work. */
+    MEM32(screen + 0xC) = 0x1FACB8;
+    strcpy((char *)XBOX_PTR(0x1FACB8), "MU_UG_TradeCareerCar.fng");
     MEM32(package + 0x88) = 0;
     MEM32(yes + 0x10) = 0x543398D3;
     MEM32(no + 0x10) = 0xDB157AC6;
@@ -1003,6 +1100,23 @@ int main(void)
     expected_message = 0x9120409E; tap_at(140.0f / 640, .65f, yes);
     expected_message = 0xB5971BF1; tap_at(500.0f / 640, .65f, no);
     assert(controller_selects == before_actions + 2);
+
+    /* Same real package-name layout, zero selectable rows and foreground
+     * registration: gaps swipe without activating or rotating the car. */
+    tap_at(.5f, .65f, no);
+    assert(controller_selects == before_actions + 2);
+    yaw = MEMF(0x2C044);
+    expected = no;
+    menu_touch_event(MENU_TOUCH_DOWN, .5f, .65f, 1280, 720); update(); update();
+    menu_touch_event(MENU_TOUCH_MOVE, .4f, .65f, 1280, 720); update();
+    assert(controller_selects == before_actions + 2 && MEMF(0x2C044) == yaw);
+    menu_touch_event(MENU_TOUCH_UP, .4f, .65f, 1280, 720); update(); update();
+    assert(controller_selects == before_actions + 3 && MEMF(0x2C044) == yaw);
+    expected_message = 0x9120409E;
+    menu_touch_event(MENU_TOUCH_DOWN, .4f, .65f, 1280, 720); update(); update();
+    menu_touch_event(MENU_TOUCH_UP, .5f, .65f, 1280, 720); update(); update();
+    assert(controller_selects == before_actions + 4);
+    before_actions += 2;
 
     /* The car name is rendered independently of the selected logo. */
     draw_bounds();
@@ -1438,6 +1552,50 @@ int main(void)
     MEM32(package + 0x80) = yes;
     tap_at(90.0f / 640, 210.0f / 480, yes);
     assert(presses == before_actions + 1);
+    /* Sensor-only stats actions reuse the native off-canvas tags. Position
+     * follows the rendered last row; both actions remain release-only. */
+    MEM32(screen) = 0x200208;
+    MEM32(0x2BE37C) = 1;
+    MEM32(package + 0x40) = yes; MEM32(package + 0x44) = no;
+    MEM32(yes + 4) = no; MEM32(no + 4) = 0;
+    MEM32(yes + 0x10) = MEM32(no + 0x10) = 0x5B9D88B9;
+    MEM32(yes + 0x5C) = 0x1A705339; MEM32(no + 0x5C) = 0xA1D233EB;
+    MEM32(yes + 0x2C) = 0x3B000; MEM32(no + 0x2C) = 0x3B080;
+    MEM32(yes + 0x60) = 0x3B100; MEM32(no + 0x60) = 0x3B140;
+    MEMF(0x3B01C) = MEMF(0x3B09C) = -530;
+    MEMF(0x3B038) = MEMF(0x3B03C) = MEMF(0x3B0B8) = MEMF(0x3B0BC) = .5f;
+    MEM32(0x39000 + 0x10) = 0x9B460C1F;
+    draw_mask = 0; draw_bounds();
+    add_quad(0x39000, 100, 300, 150, 320);
+    trade_footer_allocation = 1;
+    feng_touch_frame_begin();
+    trade_footer_allocation = 0;
+    assert(MEMF(0x3B01C) == -80 && MEMF(0x3B09C) == 80);
+    assert(MEMF(0x3B020) == 128 && MEMF(0x3B0A0) == 128);
+    assert(MEMF(0x3B038) == 1 && MEMF(0x3B0B8) == 1);
+    assert(MEM32(yes + 0x60) == 0x3D000 && MEM16(0x3D000) == 'C');
+    assert(MEM32(no + 0x60) == 0x3D040 && MEM16(0x3D040) == 'C');
+    add_quad(yes, 190, 360, 290, 380); add_quad(no, 360, 360, 440, 380);
+    before_actions = controller_selects;
+    expected_message = 0x406415E3;
+    tap_at(.37f, 370.0f / 480, yes);
+    assert(controller_selects == before_actions + 1);
+    expected_message = 0x911AB364;
+    tap_at(.62f, 370.0f / 480, no);
+    assert(controller_selects == before_actions + 2);
+    menu_touch_event(MENU_TOUCH_DOWN, .37f, 370.0f / 480, 1280, 720); update(); update();
+    menu_touch_event(MENU_TOUCH_UP, .62f, 370.0f / 480, 1280, 720); update(); update();
+    assert(controller_selects == before_actions + 2);
+    input_mode_set_controller_present(1);
+    feng_touch_frame_begin();
+    assert(MEMF(0x3B01C) == -530 && MEMF(0x3B09C) == -530);
+    /* Keep the engine-owned string; restoring a freed old +60 is unsafe.
+     * Removing custom-text mode makes the renderer use the original key. */
+    assert(MEM32(yes + 0x60) == 0x3D000 && MEM32(no + 0x60) == 0x3D040);
+    assert(!(MEM32(yes + 0x1C) & 2) && !(MEM32(no + 0x1C) & 2));
+    input_mode_set_controller_present(0);
+    MEM32(screen) = 0x1FC384; MEM32(0x2BE37C) = 0;
+    MEM32(package + 0x40) = MEM32(package + 0x44) = 0;
     /* Physical-controller mode restores touch captions and leaves native
      * drawing unchanged. Switch back only after the previous edits are gone. */
     MEM32(yes + 0x10) = 0xA87927BE;
