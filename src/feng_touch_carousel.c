@@ -115,7 +115,8 @@ static int touch_carousel_binding(uint32_t screen, TouchCarousel *binding)
         *binding = (TouchCarousel){
             .selected_node = MEM32(screen + 0x54),
             .activate_message = 0x0C407210u,
-            .label_hashes = { 0xFAC7F994u, 0x4AB1E821u },
+            .label_hashes = { type == 0x001FBDB0u ? 0xD6D32016u : 0xFAC7F994u,
+                              type == 0x001FBDB0u ? 0 : 0x4AB1E821u },
             .allow_swipe = 1
         };
         return 1;
@@ -143,6 +144,16 @@ int touch_carousel_capture(uint32_t screen, TouchTarget *target, float x, float 
     if (!touch_carousel_binding(screen, &binding)) return 0;
     uint32_t message = 0;
     uint32_t object = touch_browser_arrow(&message);
+    if (!object && MEM32(screen) == 0x001FBDB0u) {
+        object = touch_trade_next_hit();
+        if (object) {
+            target->target = object;
+            target->message = binding.activate_message;
+            target->carousel = 1;
+            touch_target_begin(target, screen, x - 320, y - 240);
+            return 1;
+        }
+    }
     if (!object) {
         object = binding.selected_object ? binding.selected_object :
             binding.selected_node ? MEM32(binding.selected_node + 0xC) : 0;

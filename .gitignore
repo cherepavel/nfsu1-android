@@ -74,3 +74,4 @@ local.properties
 
 
 performance-results
+gradle/gradle-daemon-jvm.properties

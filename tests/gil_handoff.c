@@ -18,10 +18,20 @@ static void check_signal(PCONDITION_VARIABLE cv);
 #undef WakeConditionVariable
 #include "../src/android_perf.c"
 
-int xbox_thread_holds_dispatch(void) { return 0; }
+static int test_dispatch;
+int xbox_thread_holds_dispatch(void) { return test_dispatch; }
 static unsigned signals, order_count, order[8];
 static unsigned active, increments;
 static int slow_handoff = 1;
+static unsigned poll_calls;
+static int test_poll_wait(const RecompSpinWait *poll, int block)
+{
+    assert(t_gil_depth == (block ? 0 : 2));
+    assert(poll->pc==0x001D0470 && poll->ax==4 && poll->cx==19
+        && poll->dx==0x123400 && poll->si==24);
+    if (block) poll_calls++;
+    return 1;
+}
 
 static void check_signal(PCONDITION_VARIABLE cv)
 {
@@ -135,6 +145,20 @@ int main(int argc, char **argv)
     assert(order_count == 8 && signals == 8);
     for (unsigned i = 0; i < 8; i++) assert(order[i] == i);
     assert(!s_gil_queue.head && !s_gil_queue.tail && s_gil_next == s_gil_serving);
+    /* Exact poll PC/register snapshots reach a hook with the GIL released.
+     * Nesting and the original yield/preemption paths remain intact. */
+    xbox_set_spin_wait_hook(test_poll_wait);
+    xbox_gil_enter(); xbox_gil_enter();
+    recomp_spin_yield_at(0x001D0470,4,19,0x123400,24);
+    assert(poll_calls==1 && t_gil_depth==2);
+    recomp_spin_yield(); recomp_preempt();
+    assert(poll_calls==1 && t_gil_depth==2);
+    test_dispatch=1;
+    recomp_spin_yield_at(0x001D0470,4,19,0x123400,24);
+    assert(poll_calls==1 && t_gil_depth==2);
+    test_dispatch=0;
+    xbox_gil_leave(); xbox_gil_leave();
+    xbox_set_spin_wait_hook(NULL);
 
     slow_handoff = 0;
     for (unsigned i = 0; i < 8; i++) assert(!pthread_create(&threads[i], NULL, stress_worker, NULL));

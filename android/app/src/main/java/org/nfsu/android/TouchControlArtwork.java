@@ -14,7 +14,7 @@ final class TouchControlArtwork {
         R.drawable.touch_pause, R.drawable.touch_gas, R.drawable.touch_brake,
         R.drawable.touch_handbrake, R.drawable.touch_shift_up, R.drawable.touch_shift_down,
         R.drawable.touch_nitro, R.drawable.touch_left, R.drawable.touch_right,
-        R.drawable.touch_camera
+        R.drawable.touch_camera, R.drawable.touch_reset
     };
 
     private final Bitmap[] images = new Bitmap[RESOURCES.length];

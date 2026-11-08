@@ -11,7 +11,7 @@ class SpinHintTest(unittest.TestCase):
     def test_fence_poll_is_marked(self):
         code, n = rewrite(loop(["ecx = MEM32(edx);", "edi = esi;", "edi = edi - ecx;"]))
         self.assertEqual(n, 1)
-        self.assertIn("{ RECOMP_SPIN_HINT(); goto loc_00001000; }", code)
+        self.assertIn("{ RECOMP_SPIN_HINT_AT(0x00001000u); goto loc_00001000; }", code)
 
     def test_mmio_poll_is_marked(self):
         _, n = rewrite(loop(["eax = MMIO_RD32(0xFE820010u);", "eax = eax & 0xFFFFFFFCu;"]))

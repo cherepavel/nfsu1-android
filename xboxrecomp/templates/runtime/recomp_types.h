@@ -165,13 +165,11 @@ extern uint32_t g_xbox_code_hi;
 #  define RECOMP_TLS _Thread_local
 #endif
 
-extern RECOMP_TLS uint32_t g_eax, g_ecx, g_edx, g_esp;
-extern RECOMP_TLS uint32_t g_ebx, g_esi, g_edi;
+
+#include "recomp_registers.h"
 
 /* x87 stack. Per-thread for the same reason the integer registers are:
  * arguments are passed in st(0)/st(1) across call boundaries. */
-extern RECOMP_TLS double g_fp_stack[8];
-extern RECOMP_TLS int g_fp_top;
 
 /* A function whose x87 top index lives in a local (the translator's
  * _localize_x87_stack) takes this thread's stack once, and loads and stores
@@ -196,10 +194,8 @@ static inline void recomp_fp_top_st(int top) { g_fp_top = top; }
  * Per-thread, because a TIB is. fs:[0] is the SEH chain head and fs:[4]
  * reaches the CRT's per-thread data, so a single shared base makes every
  * guest thread the same thread as far as the CRT is concerned. */
-extern RECOMP_TLS uint32_t g_fs_base;
 #define XBOX_FS_BASE g_fs_base
 
-extern RECOMP_TLS uint32_t g_seh_ebp;
 
 /* ---- non-local jumps (setjmp / longjmp) --------------------------------
  *
@@ -283,21 +279,30 @@ static inline uint32_t recomp_atomic_cas32(volatile void *p, uint32_t cmp, uint3
  * hint every turn, a wake for the runtime's sleeping hardware threads every
  * 16, a host yield every 64 -- which also hands the guest lock (kernel_bridge.c)
  * to whichever guest thread, ISR or DPC the loop is waiting for. */
+#ifdef RECOMP_EXECUTOR_TLS_ARG
+/* Resolve the block once in the generated caller, where register access can
+ * reuse its address. The bridge/query receives the owner pointer directly. */
+void recomp_preempt_for_executor(struct XgfExecutor *executor);
+#define RECOMP_PREEMPT_CALL() recomp_preempt_for_executor(g_recomp_registers.native_executor)
+#else
+#define RECOMP_PREEMPT_CALL() recomp_preempt()
+#endif
 #if defined(_MSC_VER)
 #define RECOMP_SPIN_HINT() _mm_pause()
 extern volatile int g_gil_contended;
 void recomp_preempt(void);
-#define RECOMP_PREEMPT() do { if (g_gil_contended) recomp_preempt(); } while (0)
+#define RECOMP_PREEMPT() do { if (g_gil_contended) RECOMP_PREEMPT_CALL(); } while (0)
 #else
 #include <sched.h>
 void recomp_spin_wake(void);        /* runtime: wake the hardware threads */
 void recomp_spin_yield(void);       /* runtime: yield, and the guest lock with it */
+void recomp_spin_yield_at(uint32_t pc, uint32_t ax, uint32_t cx, uint32_t dx, uint32_t si);
 /* At every lifted function entry: yield if another guest thread has been
  * waiting for the guest lock (kernel_bridge.c). One load when nobody is. */
 extern volatile int g_gil_contended;
 void recomp_preempt(void);
-#define RECOMP_PREEMPT() do { if (__builtin_expect(__atomic_load_n(&g_gil_contended, __ATOMIC_RELAXED), 0)) recomp_preempt(); } while (0)
-static inline void recomp_spin_hint(void)
+#define RECOMP_PREEMPT() do { if (__builtin_expect(__atomic_load_n(&g_gil_contended, __ATOMIC_RELAXED), 0)) RECOMP_PREEMPT_CALL(); } while (0)
+static inline void recomp_spin_hint_at(uint32_t pc, uint32_t ax, uint32_t cx, uint32_t dx, uint32_t si)
 {
     static RECOMP_TLS unsigned turns;
 #if defined(__aarch64__)
@@ -308,15 +313,20 @@ static inline void recomp_spin_hint(void)
     if ((++turns & 15u) == 0)
         recomp_spin_wake();         /* someone is waiting: answer now */
     if ((turns & 63u) == 0)
-        recomp_spin_yield();        /* lets other guest threads and ISRs run */
+        recomp_spin_yield_at(pc, ax, cx, dx, si);
 }
+static inline void recomp_spin_hint(void) { recomp_spin_hint_at(0, 0, 0, 0, 0); }
 #define RECOMP_SPIN_HINT() recomp_spin_hint()
+#define RECOMP_SPIN_HINT_AT(pc) recomp_spin_hint_at((pc), g_eax, g_ecx, g_edx, g_esi)
+#endif
+
+#ifndef RECOMP_SPIN_HINT_AT
+#define RECOMP_SPIN_HINT_AT(pc) RECOMP_SPIN_HINT()
 #endif
 
 #include <setjmp.h>
 jmp_buf *recomp_setjmp_slot(uint32_t buf_va);
 int recomp_guest_longjmp(uint32_t buf_va, uint32_t value);
-extern RECOMP_TLS uint32_t g_ebp;
 
 /* EFLAGS.DF, and the signed step the string instructions take because of it.
  *
@@ -330,16 +340,12 @@ extern RECOMP_TLS uint32_t g_ebp;
  * be found by name, and the dashboard rebooted rather than showing a UI.
  * memmove's overlapping case is the same instruction and the same bug.
  */
-extern RECOMP_TLS int g_df;
 #define RECOMP_DF_STEP(n) (g_df ? -(int32_t)(n) : (int32_t)(n))
 
 /* x87 control and status. Thread-local for the same reason the x87 stack
    above is: one guest routine can lift to several C functions, so a compare
    and the FNSTSW that reads it can land in different bodies, and the control
    word has to survive a call. (g_fp_stack/g_fp_top are declared above.) */
-extern RECOMP_TLS uint16_t g_fp_control_word;
-extern RECOMP_TLS int g_fp_cmp;
-extern RECOMP_TLS uint16_t g_fp_cc;
 #define RECOMP_FCMP_CC(c) ((uint16_t)((c)==2 ? 0x4500u : (c)<0 ? 0x0100u : (c)>0 ? 0u : 0x4000u))
 /* Values in the existing double-backed stack are all representable as normal
  * x87 extended values, including binary64 subnormals. Empty stack tags and
@@ -546,8 +552,6 @@ typedef union RecompXmm {
 } RecompXmm;
 #endif
 
-extern RECOMP_TLS RecompXmm g_xmm0, g_xmm1, g_xmm2, g_xmm3;
-extern RECOMP_TLS RecompXmm g_xmm4, g_xmm5, g_xmm6, g_xmm7;
 
 /* -- construction -- */
 
@@ -1180,8 +1184,6 @@ typedef union RecompMmx {
 } RecompMmx;
 #endif
 
-extern RECOMP_TLS RecompMmx g_mm0, g_mm1, g_mm2, g_mm3;
-extern RECOMP_TLS RecompMmx g_mm4, g_mm5, g_mm6, g_mm7;
 
 /* Loads and stores for a leaf function that keeps registers in C locals
  * (translator.py, _localize_leaf_registers). The locals shadow the globals

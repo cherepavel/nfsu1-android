@@ -19,9 +19,12 @@ public final class TouchLayoutTest {
 
     public static void main(String[] args) throws Exception {
         TouchLayout layout = new TouchLayout();
+        int reset = 10;
         layout.setPosition(1, 0.81f, 0.72f);
         layout.setSize(1, 1.5f);
         layout.setSize(0, 0.5f); // Size is independent of a custom position.
+        layout.setPosition(reset, 0.25f, 0.1f);
+        layout.setSize(reset, 1.25f);
         TouchLayout copy = layout.copy();
         copy.setSize(1, 2f);
         if (layout.getSize(1) != 1.5f) throw new AssertionError("Size copy aliases original");
@@ -35,12 +38,19 @@ public final class TouchLayoutTest {
                 || restored.hasPosition(0)) throw new AssertionError("Round trip changed layout");
         if (restored.getSize(1) != 1.5f || restored.getSize(0) != 0.5f)
             throw new AssertionError("Round trip changed button size");
+        if (restored.getX(reset) != 0.25f || restored.getY(reset) != 0.1f
+                || restored.getSize(reset) != 1.25f)
+            throw new AssertionError("Round trip changed reset button");
         TouchLayout legacy = read(xml.replaceAll(" size=\"[^\"]*\"", ""));
         if (legacy.getSize(1) != 1f) throw new AssertionError("Legacy size must default to 1");
         invalid(xml.replace("size=\"1.5\"", "size=\"NaN\""));
         invalid(xml.replace("size=\"1.5\"", "size=\"2.1\""));
         invalid(xml.replace("size=\"1.5\"", "size=\"0\""));
-        TouchLayout oldButtons = read(xml.replaceAll("  <button id=\"camera\"[^>]*>\n", ""));
+        String preReset = xml.replaceAll("  <button id=\"reset\"[^>]*>\n", "");
+        TouchLayout oldLayout = read(preReset);
+        if (oldLayout.hasPosition(reset) || oldLayout.getSize(reset) != 1f)
+            throw new AssertionError("Old presets must get default reset button");
+        TouchLayout oldButtons = read(preReset.replaceAll("  <button id=\"camera\"[^>]*>\n", ""));
         if (oldButtons.hasPosition(9) || oldButtons.getSize(9) != 1f)
             throw new AssertionError("Old presets must get default camera button");
         invalid(xml.replace("id=\"gas\"", "id=\"camera\""));

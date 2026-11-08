@@ -15,7 +15,7 @@ it waits for runs on what is left.
 
 This pass finds the loops that can only be waiting -- one block, a backward
 goto to its own label, no stores, no calls, and memory read only at addresses
-the loop does not change -- and puts RECOMP_SPIN_HINT() on the back edge
+the loop does not change -- and puts RECOMP_SPIN_HINT_AT(loop_pc) on the back edge
 (recomp_types.h: a CPU pause/yield hint, and a host thread yield every 64
 turns). A loop that walks memory (strlen, memchr) changes its address
 registers and is left alone, as is anything that writes.
@@ -112,7 +112,8 @@ def rewrite(code):
                     and last.count("goto ") == 1
                     and _is_poll(lines[i + 1:j])):
                 k = last.index(back)
-                out[j] = last[:k] + "{ RECOMP_SPIN_HINT(); " + back + " }" + last[k + len(back):]
+                pc = int(label[4:], 16)
+                out[j] = last[:k] + f"{{ RECOMP_SPIN_HINT_AT(0x{pc:08X}u); " + back + " }" + last[k + len(back):]
                 marked += 1
         i = j if j > i else i + 1
     return "\n".join(out), marked

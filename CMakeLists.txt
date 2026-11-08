@@ -9,6 +9,18 @@ cmake_minimum_required(VERSION 3.20)
 
 project(nfsu2_recomp C)
 
+option(NFSU2_REGISTER_BLOCK "Experimental grouped native TLS guest registers" OFF)
+if(NFSU2_REGISTER_BLOCK)
+    add_compile_definitions(RECOMP_REGISTER_BLOCK=1)
+endif()
+option(NFSU2_EXECUTOR_TLS_ARG "Experimental executor argument at generated safe points" OFF)
+if(NFSU2_EXECUTOR_TLS_ARG)
+    if(NOT ANDROID OR NOT NFSU2_REGISTER_BLOCK)
+        message(FATAL_ERROR "NFSU2_EXECUTOR_TLS_ARG requires Android and NFSU2_REGISTER_BLOCK")
+    endif()
+    add_compile_definitions(RECOMP_EXECUTOR_TLS_ARG=1)
+endif()
+
 if(ANDROID)
     enable_language(CXX)
     add_compile_definitions(NFSU_USE_ZLOG=1)
@@ -73,6 +85,10 @@ file(GLOB RECOMP_GEN_SOURCES CONFIGURE_DEPENDS "${NFSU2_GEN_DIR}/*.c")
 set(GAME_SOURCES
     src/main.c
     src/recomp_manual.c
+    src/movie_yuv.c
+    src/culling_native.c
+    src/matrix_native.c
+    src/d3d_fence_wait.c
     src/switch_nx.c
 )
 
@@ -132,8 +148,8 @@ if(WIN32)
 else()
     # The generated chunks are huge straight-line functions; -O1 keeps GCC's
     # memory and time per chunk sane while still allocating registers. The
-    # Switch's CPU is the bottleneck there, so it gets -O2.
-    if(NINTENDO_SWITCH)
+    # Switch and Android are CPU-bound, so their lifted code uses -O2.
+    if(NINTENDO_SWITCH OR ANDROID)
         set(NFSU2_GEN_OPT "-O2" CACHE STRING "Optimisation for the lifted code")
     else()
         set(NFSU2_GEN_OPT "-O1" CACHE STRING "Optimisation for the lifted code")
@@ -145,6 +161,10 @@ else()
     option(NFSU2_LTO "Link-time optimisation of the lifted code" OFF)
     set(NFSU2_LTO_JOBS "4" CACHE STRING "Parallel LTO link jobs")
     set(NFSU2_GEN_FLAGS "${NFSU2_GEN_OPT};-w;-fno-strict-aliasing;-fwrapv")
+    if(ANDROID)
+        # Lifted SSE/x87 operations have separate guest rounding boundaries.
+        list(APPEND NFSU2_GEN_FLAGS "-ffp-contract=off")
+    endif()
     if(NFSU2_LTO)
         list(APPEND NFSU2_GEN_FLAGS "-flto=auto")
         set_property(SOURCE src/recomp_manual.c APPEND PROPERTY
@@ -154,6 +174,10 @@ else()
     endif()
     set_source_files_properties(${RECOMP_GEN_SOURCES} PROPERTIES
         COMPILE_OPTIONS "${NFSU2_GEN_FLAGS}")
+    set_source_files_properties(src/movie_yuv.c PROPERTIES COMPILE_OPTIONS "-O2")
+    set_source_files_properties(src/culling_native.c src/matrix_native.c PROPERTIES
+        COMPILE_OPTIONS "-O2;-ffp-contract=off;-fno-strict-aliasing")
+    set_source_files_properties(src/d3d_fence_wait.c PROPERTIES COMPILE_OPTIONS "-O2")
     target_link_libraries(${PROJECT_NAME} PRIVATE m)
 endif()
 

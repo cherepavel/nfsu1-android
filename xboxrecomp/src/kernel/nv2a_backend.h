@@ -167,6 +167,8 @@ typedef struct {
     void (*draw_raw)(const Nv2aRawBatch *b);
     /* NV2A_BACKEND_* bits. */
     uint32_t flags;
+    /* Optional ordered private UI marker, on the renderer thread. */
+    void (*ui_phase)(int begin);
 } Nv2aBackend;
 
 /* draw_raw takes attributes in their stored format (Nv2aRawBatch.attr_direct).
@@ -196,5 +198,6 @@ int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out);
  * ponytail: the title supplies the address instead of the executor resolving
  * the semaphore context DMA object through RAMIN. */
 void nv2a_pb_set_semaphore_target(uint32_t guest_va);
+int nv2a_pb_wait_semaphore(uint32_t guest_va, uint32_t submitted, uint32_t delta);
 
 #endif /* NV2A_BACKEND_H */

@@ -24,6 +24,7 @@
  * has not given us any vertices". RECOMP_FB_DUMP=<prefix> writes the surface to
  * <prefix>NNN.bmp, so the result can be looked at without a display.
  */
+#include "../../include/nfsu_perf.h"
 #include "../../include/nfsu_log.h"
 #include <math.h>
 #include <stdio.h>
@@ -38,6 +39,12 @@
 #include "../d3d/d3d8_swizzle.h"
 #include "../d3d/d3d8_dxt.h"
 #include "nv2a_backend.h"
+#include "nv2a_indices.h"
+#include "nv2a_ui_marker.h"
+#ifdef __ANDROID__
+#include "nv2a_fence_wait.h"
+static Nv2aFenceWait s_fence_wait = NV2A_FENCE_WAIT_INITIALIZER;
+#endif
 
 extern ptrdiff_t xbox_GetMemoryOffset(void);
 extern void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch);
@@ -434,7 +441,30 @@ static float reg_f(uint32_t method) { float f; memcpy(&f, &s_reg[method / 4], 4)
 
 static uint32_t s_sem_va;
 static uint32_t s_vtx_epoch;            /* Nv2aRawBatch.vtx_epoch */
-void nv2a_pb_set_semaphore_target(uint32_t guest_va) { s_sem_va = guest_va; }
+void nv2a_pb_set_semaphore_target(uint32_t guest_va)
+{
+#ifdef __ANDROID__
+    __atomic_store_n(&s_sem_va, guest_va, __ATOMIC_RELEASE);
+#else
+    s_sem_va = guest_va;
+#endif
+}
+
+int nv2a_pb_wait_semaphore(uint32_t guest_va, uint32_t submitted, uint32_t delta)
+{
+#ifdef __ANDROID__
+    if (!guest_va || (guest_va & 3u)
+            || guest_va != __atomic_load_n(&s_sem_va, __ATOMIC_ACQUIRE)) return 0;
+    uint32_t *word = (uint32_t *)((uint8_t *)xbox_GetMemoryOffset() + guest_va);
+    uint64_t perf_wait = nfsu_perf_begin();
+    nv2a_fence_wait(&s_fence_wait, word, submitted, delta, 1000000L);
+    nfsu_perf_end(NFSU_PERF_PB_SEMAPHORE, perf_wait);
+    return 1;
+#else
+    (void)guest_va; (void)submitted; (void)delta;
+    return 0;
+#endif
+}
 
 /* Slot + 1 of each method in s_unhandled: this runs millions of times a
  * second, so no search. The report sorts s_unhandled and rebuilds it. */
@@ -4046,6 +4076,12 @@ static void flip_apply_retired(void)
 void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
 {
     static int inited;
+    int ui_begin;
+    if (nv2a_ui_marker(subch, method, param, &ui_begin)) {
+        if (!s_gpu.prim && s_backend && s_backend->ui_phase)
+            s_backend->ui_phase(ui_begin);
+        return;
+    }
 
     /* The shadow is the 3D class's register file: methods to the other
      * subchannels (2D surfaces, blits) share its offsets and must not land
@@ -4068,12 +4104,22 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
     /* BACK_END_WRITE_SEMAPHORE_RELEASE. The title's pointer already names the
      * semaphore word; SET_SEMAPHORE_OFFSET is not added (in X-Men Legends it
      * held 0xFF000000 at times, which put the write outside guest memory). */
-    if (method == 0x1D70)
+    if (method == 0x1D70) {
         s_vtx_epoch++;
-    if (method == 0x1D70 && s_sem_va) {
-        uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
-        *(volatile uint32_t *)(mem + s_sem_va) = param;
-        return;
+#ifdef __ANDROID__
+        uint32_t sem_va = __atomic_load_n(&s_sem_va, __ATOMIC_ACQUIRE);
+#else
+        uint32_t sem_va = s_sem_va;
+#endif
+        if (sem_va) {
+            uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
+#ifdef __ANDROID__
+            nv2a_fence_publish(&s_fence_wait, (uint32_t *)(mem + sem_va), param);
+#else
+            *(volatile uint32_t *)(mem + sem_va) = param;
+#endif
+            return;
+        }
     }
     /* The pattern object's SET_MONOCHROME_COLOR0 (0x0310) latches into
      * NV_PGRAPH_PATT_COLOR0 (0xFD400B10), and stock XDK D3D uses exactly that
@@ -4526,10 +4572,8 @@ uint32_t nv2a_pb_exec_run(uint32_t subch, uint32_t method, int noninc,
             s_reg_dirty[w >> 4] = 1;
         }
         if (s_gpu.prim)
-            for (i = 0; i < count && s_gpu.idx_count + 2 <= NV_MAX_INDICES; i++) {
-                s_gpu.idx[s_gpu.idx_count++] = (uint16_t)(p[i] & 0xFFFF);
-                s_gpu.idx[s_gpu.idx_count++] = (uint16_t)(p[i] >> 16);
-            }
+            s_gpu.idx_count = nv2a_append_indices16(s_gpu.idx, s_gpu.idx_count,
+                                                   NV_MAX_INDICES, p, count);
         return count;
     }
     if (!noninc && method >= NV097_SET_TRANSFORM_CONSTANT

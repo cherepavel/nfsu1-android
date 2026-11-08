@@ -16,7 +16,7 @@ final class TouchLayout {
     static final float MIN_SIZE = 0.5f, MAX_SIZE = 2.0f;
     static final String[] IDS = {
         "menu", "gas", "brake", "handbrake", "shift-up", "shift-down",
-        "nitro", "left", "right", "camera"
+        "nitro", "left", "right", "camera", "reset"
     };
     private final float[] sizes = new float[IDS.length];
     private final float[] x = new float[IDS.length];
@@ -99,8 +99,7 @@ final class TouchLayout {
                             Float.parseFloat(button.getAttribute("y")));
                 }
             }
-            // Version 1 predates the camera button. Require the original nine;
-            // older layouts get the new camera button at its default position.
+            // Version 1 predates camera and reset. Older layouts use their defaults.
             for (int i = 0; i < 9; i++) {
                 if (!seen[i]) throw new IOException("Missing button: " + IDS[i]);
             }

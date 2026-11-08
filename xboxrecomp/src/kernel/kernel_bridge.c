@@ -25,6 +25,7 @@
  *   different parameter layouts (pointer vs value), so each needs its own bridge.
  */
 #include "../../include/nfsu_log.h"
+#include "../../include/recomp_spin_wait.h"
 
 #include "kernel.h"
 #include "xbox_memory_layout.h"
@@ -107,11 +108,7 @@ int xbox_log_quiet(void)
  * xbox_memory_layout.h and must match the definitions there -- a plain extern
  * here binds to the TLS template rather than the calling thread's copy, which
  * reads as every register being zero. */
-extern RECOMP_TLS uint32_t g_eax, g_ecx, g_edx, g_esp;
-extern RECOMP_TLS uint32_t g_ebx, g_esi, g_edi;
-extern RECOMP_TLS uint32_t g_ebp;          /* the guest frame chain (wait report) */
 extern uint32_t g_xbox_code_lo, g_xbox_code_hi;
-extern RECOMP_TLS uint32_t g_seh_ebp;
 extern ptrdiff_t g_xbox_mem_offset;
 
 /* Dispatch table lookup (for function pointer args) */
@@ -935,7 +932,20 @@ void xbox_gil_resume(int depth)
 }
 
 /* Separate the two callers without counting preemption again as spin. */
-static void gil_yield_measured(int wait_metric, int total_metric)
+#if defined(__ANDROID__) || defined(NFSU_GIL_HANDOFF_TEST) || defined(NFSU_GUEST_SCHEDULER_TEST)
+static RecompSpinWaitHook s_spin_wait_hook;
+#endif
+
+void xbox_set_spin_wait_hook(RecompSpinWaitHook hook)
+{
+#if defined(__ANDROID__) || defined(NFSU_GIL_HANDOFF_TEST) || defined(NFSU_GUEST_SCHEDULER_TEST)
+    __atomic_store_n(&s_spin_wait_hook, hook, __ATOMIC_RELEASE);
+#else
+    (void)hook;
+#endif
+}
+
+static void gil_yield_measured_poll(int wait_metric, int total_metric, const RecompSpinWait *poll)
 {
 #ifdef NFSU_GUEST_EXECUTOR
     if (bridge_on_executor()) {
@@ -945,8 +955,13 @@ static void gil_yield_measured(int wait_metric, int total_metric)
         return;
     }
 #endif
+    RecompSpinWaitHook hook = NULL;
+#if defined(__ANDROID__) || defined(NFSU_GIL_HANDOFF_TEST) || defined(NFSU_GUEST_SCHEDULER_TEST)
+    hook = __atomic_load_n(&s_spin_wait_hook, __ATOMIC_ACQUIRE);
+#endif
+    int native_poll = poll && hook && !xbox_thread_holds_dispatch() && hook(poll, 0);
 #if defined(__ANDROID__) || defined(NFSU_GUEST_SCHEDULER_TEST)
-    if (s_guest_scheduler_on && t_gil_depth > 0) {
+    if (s_guest_scheduler_on && t_gil_depth > 0 && !native_poll) {
         uint64_t start = nfsu_perf_begin();
         XgsAcquire acquired = xgs_yield_reason(wait_metric == NFSU_PERF_SPIN_WAIT);
         if (acquired.switched && start) {
@@ -968,7 +983,7 @@ static void gil_yield_measured(int wait_metric, int total_metric)
     /* suspend may report/reset this thread's PERF5 window. Snapshot after it. */
     uint64_t start = d > 0 ? nfsu_perf_begin() : 0;
     uint64_t wait_before = nfsu_perf_gil_wait_sum();
-    SwitchToThread();
+    if (!native_poll || !hook(poll, 1)) SwitchToThread();
     xbox_gil_resume(d);
     if (start) {
         uint64_t wait_after = nfsu_perf_gil_wait_sum();
@@ -976,6 +991,17 @@ static void gil_yield_measured(int wait_metric, int total_metric)
             nfsu_perf_add(wait_metric, wait_after - wait_before);
         nfsu_perf_end(total_metric, start);
     }
+}
+
+static void gil_yield_measured(int wait_metric, int total_metric)
+{
+    gil_yield_measured_poll(wait_metric, total_metric, NULL);
+}
+
+void recomp_spin_yield_at(uint32_t pc, uint32_t ax, uint32_t cx, uint32_t dx, uint32_t si)
+{
+    RecompSpinWait poll = {pc, ax, cx, dx, si};
+    gil_yield_measured_poll(NFSU_PERF_SPIN_WAIT, NFSU_PERF_SPIN_TOTAL, &poll);
 }
 
 /* RECOMP_SPIN_HINT's periodic yield: a poll loop waits for another thread,
@@ -1000,16 +1026,8 @@ static int gil_main_quantum_pending(uint64_t now)
 }
 #endif
 
-void recomp_preempt(void)
+static void recomp_preempt_native(void)
 {
-#ifdef NFSU_GUEST_EXECUTOR
-    XgfPreemptStatus status = xgf_preempt_status();
-    if (status != XGF_PREEMPT_NATIVE) {
-        if (status == XGF_PREEMPT_YIELD)
-            gil_yield_measured(NFSU_PERF_PREEMPT_WAIT, NFSU_PERF_PREEMPT_TOTAL);
-        return;
-    }
-#endif
     if (t_gil_depth <= 0 || t_gil_nopreempt || xbox_thread_holds_dispatch())
         return;
 #if defined(__ANDROID__) || defined(NFSU_GUEST_SCHEDULER_TEST)
@@ -1025,6 +1043,34 @@ void recomp_preempt(void)
 #endif
     gil_yield_measured(NFSU_PERF_PREEMPT_WAIT, NFSU_PERF_PREEMPT_TOTAL);
 }
+
+#ifdef NFSU_GUEST_EXECUTOR
+static void recomp_preempt_status(XgfPreemptStatus status)
+{
+    if (status == XGF_PREEMPT_NATIVE) recomp_preempt_native();
+    else if (status == XGF_PREEMPT_YIELD)
+        gil_yield_measured(NFSU_PERF_PREEMPT_WAIT, NFSU_PERF_PREEMPT_TOTAL);
+}
+#endif
+
+void recomp_preempt(void)
+{
+#ifdef NFSU_GUEST_EXECUTOR
+    recomp_preempt_status(xgf_preempt_status());
+#else
+    recomp_preempt_native();
+#endif
+}
+
+#ifdef RECOMP_EXECUTOR_TLS_ARG
+#ifndef NFSU_GUEST_EXECUTOR
+#error RECOMP_EXECUTOR_TLS_ARG requires the guest executor bridge
+#endif
+void recomp_preempt_for_executor(XgfExecutor *executor)
+{
+    recomp_preempt_status(xgf_preempt_status_for_executor(executor));
+}
+#endif
 
 #define GUEST_CALL(f) do { xbox_gil_enter(); (f)(); xbox_gil_leave(); } while (0)
 /* An interrupt or DPC routine: guest code under the lock, never pre-empted. */

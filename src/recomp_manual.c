@@ -32,6 +32,32 @@
 #define RECOMP_GENERATED_CODE
 #include "recomp_funcs.h"
 
+/* Opt-in native bounds/frustum test; retain generated body as fallback. */
+extern void sub_00018C30_gen(void);
+extern int nfsu_culling_native(void);
+void sub_00018C30(void)
+{
+    if (!nfsu_culling_native()) sub_00018C30_gen();
+}
+
+/* Packed Xbox matrix multiply -> ARM64 NEON, preserving its guest ABI. */
+extern void sub_00169F4A_gen(void);
+extern int nfsu_matrix_native(void);
+void sub_00169F4A(void)
+{
+    RECOMP_PREEMPT();
+    if (!nfsu_matrix_native()) sub_00169F4A_gen();
+}
+
+/* Software movie decoder's table-based YUV -> 32-bit RGB row conversion. */
+extern void sub_0019D840_gen(void);
+extern int nfsu_movie_yuv_native(void);
+void sub_0019D840(void)
+{
+    RECOMP_PREEMPT();
+    if (!nfsu_movie_yuv_native()) sub_0019D840_gen();
+}
+
 #ifdef __ANDROID__
 #include <pthread.h>
 #include <time.h>
@@ -320,6 +346,7 @@ void sub_001B3640(void) { crt_memmove(); }
 #define NFSU2_D3D_DEVICE_PTR 0x001DE9E8u
 extern void nv2a_pb_set_semaphore_target(uint32_t guest_va);
 extern void sub_001D0340_gen(void);
+extern void nfsu_d3d_fence_wait_init(void);
 
 void sub_001D0340(void)
 {
@@ -330,6 +357,7 @@ void sub_001D0340(void)
     if (exec < 0)
         exec = getenv("RECOMP_PB_EXEC") != NULL;
     if (exec) {
+        nfsu_d3d_fence_wait_init();
         static uint32_t registered;
         if (sem && sem != registered) {
             nv2a_pb_set_semaphore_target(sem);
@@ -923,6 +951,8 @@ static const int s_scale_pct[] = { 100, 150, 200, 250 };
 static const int s_aniso_lvl[] = { 1, 2, 4, 8, 16 };
 
 static int s_blur = 1;                  /* native blur enabled by default */
+static uint32_t s_bloom_saved;
+static int s_bloom_overridden;
 static int s_fps60;                     /* experimental; default 30 FPS */
 static int s_refl = 1;                  /* 0 off, 1 on */
 static int s_scale_idx = 1;             /* into s_scale_pct: 1.5x */
@@ -1525,6 +1555,23 @@ void sub_00016050(void)
     uint32_t blur_limit = MEM32(0x0021C0B4u);
     int n;
 
+    /* Frame Effects (15370 -> 28FF0) runs AFTER this world-render call.
+     * Its native bloom-enable flag is independent of the speed-blur cap.
+     * Keep the option in force across that later stage, restoring the
+     * captured native value when the user enables Blur/Bloom again. */
+    if (!s_blur) {
+        if (!s_bloom_overridden) {
+            s_bloom_saved = MEM32(0x0021C0A8u);
+            s_bloom_overridden = 1;
+            NFS_LOG_INFO("system", "[options] disabling native bloom (saved=%u)\n", s_bloom_saved);
+        }
+        MEM32(0x0021C0A8u) = 0;
+    } else if (s_bloom_overridden) {
+        MEM32(0x0021C0A8u) = s_bloom_saved;
+        s_bloom_overridden = 0;
+        NFS_LOG_INFO("system", "[options] restoring native bloom=%u\n", s_bloom_saved);
+    }
+
     /* 11100/11140/11150 set the native blur request. 286E0 smooths it
      * through 264FA4. 286E0 adds speed blur and clamps its intensity to
      * 21C0B4 before drawing. Zero the cap as well to disable both sources while
@@ -1586,6 +1633,38 @@ extern void sub_00016460_gen(void);
 extern void sub_000C1860_gen(void);
 static uint32_t s_menu_size_user;       /* bits the slider last stored */
 
+#if defined(__ANDROID__) && defined(NFSU2_VULKAN)
+#include <sys/system_properties.h>
+#include "../xboxrecomp/src/kernel/nv2a_ui_marker.h"
+static int ui_native_marker_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        char property[PROP_VALUE_MAX] = {0};
+        const char *value = getenv("RECOMP_VK_UI_NATIVE");
+        if (!value && __system_property_get("debug.nfsu.ui_native", property) > 0) value = property;
+        enabled = value && !strcmp(value, "1");
+    }
+    return enabled;
+}
+/* Insert in the producer's own D3D buffer, before publication to the renderer.
+ * Never call the backend directly from this thread. If the native reserve
+ * margin is exhausted, skip the marker instead of changing guest ABI/state.
+ * D3D's existing writers reserve at device+4; require both words before it. */
+static int ui_native_marker_write(uint32_t param)
+{
+    uint32_t device = MEM32(0x001DE9E8u), at, limit;
+    if (!audio_pointer_ok(device, 8)) return 0;
+    at = MEM32(device); limit = MEM32(device + 4);
+    if (!audio_pointer_ok(at, 8) || at > UINT32_MAX - 8 || at + 8 > limit) return 0;
+    MEM32(at) = NV2A_UI_PACKET;
+    MEM32(at + 4) = param;
+    MEM32(device) = at + 8;
+    return 1;
+}
+static unsigned s_ui_marker_depth;
+#endif
+
 void sub_00016460(void)
 {
     uint32_t v = MEM32(NFSU1_MENU_SIZE);
@@ -1596,7 +1675,18 @@ void sub_00016460(void)
     if (v != s_menu_size_user && f > 0.919f && f < 0.921f)
         MEM32(NFSU1_MENU_SIZE) = 0x3F800000u;   /* 1.0f */
     s_ui_aspect_active = horplus_on() && MEM32(NFSU1_GAMEFLOW_STATE) == 6;
+#if defined(__ANDROID__) && defined(NFSU2_VULKAN)
+    int marked = 0;
+    if (ui_native_marker_enabled() && s_ui_marker_depth++ == 0)
+        marked = ui_native_marker_write(NV2A_UI_BEGIN);
+#endif
     sub_00016460_gen();
+#if defined(__ANDROID__) && defined(NFSU2_VULKAN)
+    if (ui_native_marker_enabled()) {
+        if (marked) ui_native_marker_write(NV2A_UI_END);
+        s_ui_marker_depth--;
+    }
+#endif
     s_ui_aspect_active = previous;
 }
 
