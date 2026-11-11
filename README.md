@@ -48,7 +48,7 @@ If `nfsu.xbe` is omitted, Gradle uses
 Then build:
 
 ```sh
-./gradlew assembleDebug -Pnfsu.registerBlock=true -Pnfsu.executorTlsArg=true
+./build_debug.sh
 ```
 
 Gradle creates its own Python virtual environment, installs the pinned generator

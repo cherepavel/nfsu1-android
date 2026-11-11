@@ -23,7 +23,7 @@ nfsu.xbe=/path/to/Need For Speed Underground/default.xbe
 Build from the repository root, or open the root directory in Android Studio:
 
 ```sh
-./gradlew assembleDebug -Pnfsu.registerBlock=true -Pnfsu.executorTlsArg=true
+./build_debug.sh
 ```
 
 Gradle installs Python dependencies in its own virtual environment, runs the
