@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <math.h>
 #include <string.h>
+#include <time.h>
 #include "recomp_types.h"
 #include "menu_touch.h"
 #include "feng_touch.h"
@@ -504,6 +505,83 @@ int main(void)
     assert(controller_selects == paint_actions + 1);
     tap(.3f, yes); /* third tap starts a fresh pair */
     assert(controller_selects == paint_actions + 1);
+    struct timespec inspect_paint = { .tv_nsec = 400000000 };
+    nanosleep(&inspect_paint, NULL); /* inspect the preview beyond the old 350 ms limit */
+    tap(.3f, yes);
+    assert(controller_selects == paint_actions + 2);
+    /* A material can reuse both the swatch record and its color data. It
+     * still needs a fresh preview before purchase, even on the same channel. */
+    tap(.3f, yes);
+    MEM32(screen + 0xB24)++;
+    tap(.3f, yes);
+    assert(controller_selects == paint_actions + 2);
+    tap(.3f, yes);
+    assert(controller_selects == paint_actions + 3);
+    int material_previews = palette_previews;
+    menu_touch_event(MENU_TOUCH_DOWN, .3f, .6f, 1280, 720); update(); update();
+    MEM32(screen + 0xB24)++; /* material changed between press and release */
+    menu_touch_event(MENU_TOUCH_UP, .3f, .6f, 1280, 720); update(); update();
+    assert(palette_previews == material_previews);
+    MEM32(screen + 0xB24) = 0;
+    /* The visible material arrows and trigger glyphs belong to ColorPicker,
+     * including the gap between each pair. They must send Pad_Button2/3,
+     * never Left/Right (which would change the selected swatch). */
+    const uint32_t material_left = 0x41000, material_right = 0x41100;
+    const uint32_t trigger_left = 0x41200, trigger_right = 0x41300;
+    MEM32(material_left + 0x10) = 0xDFB9B476; /* PrevMaterialArrow */
+    MEM32(material_right + 0x10) = 0xC31FB618; /* NextMaterialArrow */
+    MEM32(trigger_left + 0x10) = 0x5A418323; /* ColorCategoryLeftButton */
+    MEM32(trigger_right + 0x10) = 0x718751D6; /* ColorCategoryRightButton */
+    draw_bounds();
+    add_quad(material_left, 30, 50, 50, 70);
+    add_quad(trigger_left, 80, 50, 100, 70);
+    add_quad(material_right, 590, 50, 610, 70);
+    add_quad(trigger_right, 540, 50, 560, 70);
+    paint_actions = controller_selects;
+    material_previews = palette_previews;
+    float material_yaw;
+    memcpy(&material_yaw, (void *)XBOX_PTR(0x2C044), 4);
+    expected = material_left; expected_message = 0xC519BFC1;
+    menu_touch_event(MENU_TOUCH_DOWN, 40.0f/640, 60.0f/480, 1280, 720);
+    update(); update(); update();
+    assert(controller_selects == paint_actions); /* release-only, no held repeats */
+    menu_touch_event(MENU_TOUCH_UP, 40.0f/640, 60.0f/480, 1280, 720);
+    update(); update();
+    assert(controller_selects == paint_actions + 1);
+    tap_at(90.0f/640, 60.0f/480, material_left); /* trigger glyph */
+    tap_at(65.0f/640, 60.0f/480, material_left); /* gap */
+    expected_message = 0xC519BFC2;
+    tap_at(600.0f/640, 60.0f/480, material_right);
+    tap_at(550.0f/640, 60.0f/480, material_right);
+    tap_at(575.0f/640, 60.0f/480, material_right);
+    assert(controller_selects == paint_actions + 6 && palette_previews == material_previews);
+    /* A drag over the arrow cancels its action and never orbits the car. */
+    menu_touch_event(MENU_TOUCH_DOWN, 600.0f/640, 60.0f/480, 1280, 720);
+    update(); update();
+    menu_touch_event(MENU_TOUCH_UP, 630.0f/640, 60.0f/480, 1280, 720);
+    update(); update();
+    memcpy(&after, (void *)XBOX_PTR(0x2C044), 4);
+    assert(controller_selects == paint_actions + 6 && after == material_yaw);
+    menu_touch_event(MENU_TOUCH_DOWN, 600.0f/640, 60.0f/480, 1280, 720);
+    update(); update();
+    MEM32(screen + 0xB24)++;
+    menu_touch_event(MENU_TOUCH_UP, 600.0f/640, 60.0f/480, 1280, 720);
+    update(); update();
+    assert(controller_selects == paint_actions + 6); /* stale material arrow */
+    draw_bounds(); /* arrows absent from the current frame */
+    tap_at(600.0f/640, 60.0f/480, 0);
+    assert(controller_selects == paint_actions + 6);
+    MEM32(material_right + 0x1C) = 0x04000000;
+    add_quad(material_right, 590, 50, 610, 70);
+    tap_at(600.0f/640, 60.0f/480, 0);
+    assert(controller_selects == paint_actions + 6); /* disabled arrow */
+    draw_bounds();
+    add_quad(trigger_right, 540, 50, 560, 70);
+    tap_at(550.0f/640, 60.0f/480, trigger_right); /* glyph without arrow */
+    assert(controller_selects == paint_actions + 7);
+    MEM32(screen + 0xB24) = 0;
+    draw_bounds();
+    expected_message = 0x406415E3;
     /* Vinyl uses the same swatches and preview path for each color channel.
      * Explicit Accept forwards Select; it must never auto-accept a new channel
      * merely because its swatch address and color match the previous one. */
