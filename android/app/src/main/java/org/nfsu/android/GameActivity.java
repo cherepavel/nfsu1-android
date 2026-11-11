@@ -75,7 +75,7 @@ public final class GameActivity extends SDLActivity {
         toolbar.setPadding(12, 4, 12, 4);
         toolbar.setBackgroundColor(0xEE102F40);
         android.widget.TextView title = new android.widget.TextView(this);
-        title.setText("Перетащите кнопки • панель тоже можно двигать");
+        title.setText(R.string.touch_editor_instructions);
         title.setPadding(8, 8, 8, 8);
         title.setOnTouchListener(new View.OnTouchListener() {
             private float offsetX, offsetY;
@@ -96,7 +96,7 @@ public final class GameActivity extends SDLActivity {
         toolbar.addView(title);
         android.widget.LinearLayout actions = new android.widget.LinearLayout(this);
         toolbar.addView(actions);
-        addEditorButton(actions, "Сохранить", new View.OnClickListener() {
+        addEditorButton(actions, R.string.touch_editor_save, new View.OnClickListener() {
             @Override public void onClick(View view) {
                 try {
                     touchLayoutStore.save(raceControls.getLayout());
@@ -104,20 +104,20 @@ public final class GameActivity extends SDLActivity {
                 } catch (java.io.IOException exception) {
                     android.util.Log.e("TouchLayout", "Cannot save layout", exception);
                     android.widget.Toast.makeText(GameActivity.this,
-                            "Не удалось сохранить раскладку", android.widget.Toast.LENGTH_LONG).show();
+                            R.string.touch_editor_save_failed, android.widget.Toast.LENGTH_LONG).show();
                 }
             }
         });
-        addEditorButton(actions, "Сброс", new View.OnClickListener() {
+        addEditorButton(actions, R.string.touch_editor_reset, new View.OnClickListener() {
             @Override public void onClick(View view) { raceControls.resetLayout(); }
         });
-        addEditorButton(actions, "Отмена", new View.OnClickListener() {
+        addEditorButton(actions, R.string.touch_editor_cancel, new View.OnClickListener() {
             @Override public void onClick(View view) { closeTouchEditor(false); }
         });
         android.content.SharedPreferences editorPreferences =
                 getSharedPreferences("touch-editor", MODE_PRIVATE);
         android.widget.CheckBox snap = new android.widget.CheckBox(this);
-        snap.setText("Привязка к сетке");
+        snap.setText(R.string.touch_editor_snap_to_grid);
         snap.setTextColor(android.graphics.Color.WHITE);
         snap.setButtonTintList(android.content.res.ColorStateList.valueOf(0xFF55BCD8));
         snap.setChecked(editorPreferences.getBoolean("snap_to_grid", false));
@@ -134,30 +134,57 @@ public final class GameActivity extends SDLActivity {
         toolbar.addView(sizeLabel);
         android.widget.SeekBar sizeSlider = new android.widget.SeekBar(this);
         sizeSlider.setMax(Math.round((TouchLayout.MAX_SIZE - TouchLayout.MIN_SIZE)*100));
+        sizeSlider.setContentDescription(getString(R.string.touch_button_size));
         toolbar.addView(sizeSlider);
-        Runnable updateSize = new Runnable() {
+        String[] buttonNames = getResources().getStringArray(R.array.touch_button_names);
+        android.widget.LinearLayout opacityRow = new android.widget.LinearLayout(this);
+        opacityRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        android.widget.TextView opacityLabel = new android.widget.TextView(this);
+        opacityLabel.setTextColor(android.graphics.Color.WHITE);
+        opacityRow.addView(opacityLabel);
+        android.widget.SeekBar opacitySlider = new android.widget.SeekBar(this);
+        opacitySlider.setMax(100);
+        opacitySlider.setContentDescription(getString(R.string.touch_button_opacity));
+        opacityRow.addView(opacitySlider, new android.widget.LinearLayout.LayoutParams(
+                0, android.view.ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        toolbar.addView(opacityRow);
+        Runnable updateEditor = new Runnable() {
             @Override public void run() {
                 int selected = raceControls.getSelectedButton();
                 sizeSlider.setEnabled(selected >= 0);
                 sizeSlider.setProgress(Math.round((raceControls.getSelectedSize() - TouchLayout.MIN_SIZE)*100));
-                sizeLabel.setText(selected < 0 ? "Выберите кнопку для изменения размера"
-                        : TouchLayout.IDS[selected] + " • " + Math.round(raceControls.getSelectedSize()*100) + "%");
+                sizeLabel.setText(selected < 0 ? getString(R.string.touch_editor_select_button)
+                        : getString(R.string.touch_button_size_percent, buttonNames[selected],
+                                Math.round(raceControls.getSelectedSize()*100)));
+                int opacityPercent = Math.round(raceControls.getButtonOpacity()*100);
+                opacitySlider.setProgress(opacityPercent);
+                opacityLabel.setText(getString(R.string.touch_button_opacity_percent, opacityPercent));
             }
         };
-        raceControls.setSelectionChanged(updateSize);
+        raceControls.setSelectionChanged(updateEditor);
         sizeSlider.setOnSeekBarChangeListener(new android.widget.SeekBar.OnSeekBarChangeListener() {
             @Override public void onProgressChanged(android.widget.SeekBar slider, int progress, boolean fromUser) {
                 if (fromUser) {
                     raceControls.resizeSelected(TouchLayout.MIN_SIZE + progress/100f);
-                    updateSize.run();
+                    updateEditor.run();
                 }
             }
             @Override public void onStartTrackingTouch(android.widget.SeekBar slider) { }
             @Override public void onStopTrackingTouch(android.widget.SeekBar slider) { }
         });
-        updateSize.run();
-        touchPresets = new TouchPresetController(this, raceControls, gameDirectory(), updateSize);
-        addEditorButton(actions, "Пресеты", new View.OnClickListener() {
+        opacitySlider.setOnSeekBarChangeListener(new android.widget.SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(android.widget.SeekBar slider, int progress, boolean fromUser) {
+                if (fromUser) {
+                    raceControls.setButtonOpacity(progress/100f);
+                    updateEditor.run();
+                }
+            }
+            @Override public void onStartTrackingTouch(android.widget.SeekBar slider) { }
+            @Override public void onStopTrackingTouch(android.widget.SeekBar slider) { }
+        });
+        updateEditor.run();
+        touchPresets = new TouchPresetController(this, raceControls, gameDirectory(), updateEditor);
+        addEditorButton(actions, R.string.touch_editor_presets, new View.OnClickListener() {
             @Override public void onClick(View view) { touchPresets.show(); }
         });
         editorToolbar = toolbar;
@@ -168,7 +195,7 @@ public final class GameActivity extends SDLActivity {
         mLayout.addView(toolbar, params);
     }
 
-    private void addEditorButton(android.widget.LinearLayout parent, String text,
+    private void addEditorButton(android.widget.LinearLayout parent, int text,
             View.OnClickListener listener) {
         android.widget.Button button = new android.widget.Button(this);
         button.setText(text);

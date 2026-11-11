@@ -30,7 +30,7 @@ final class TouchControlArtwork {
         }
     }
 
-    void draw(Canvas canvas, int index, RectF bounds, boolean down) {
+    void draw(Canvas canvas, int index, RectF bounds, boolean down, float opacity) {
         Bitmap image = images[index];
         float scale = Math.min(bounds.width() / image.getWidth(),
                 bounds.height() / image.getHeight());
@@ -38,7 +38,7 @@ final class TouchControlArtwork {
         float halfHeight = image.getHeight() * scale / 2;
         destination.set(bounds.centerX() - halfWidth, bounds.centerY() - halfHeight,
                 bounds.centerX() + halfWidth, bounds.centerY() + halfHeight);
-        paint.setAlpha(down ? 255 : 230);
+        paint.setAlpha(Math.round((down ? 255 : 230) * opacity));
         paint.setColorFilter(down ? pressed : null);
         canvas.drawBitmap(image, null, destination, paint);
     }

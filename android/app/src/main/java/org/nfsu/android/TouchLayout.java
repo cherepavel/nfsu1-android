@@ -11,7 +11,7 @@ import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 import org.w3c.dom.NodeList;
 
-/** Normalized button centers; NaN means the original, aspect-aware position. */
+/** Button opacity, sizes and normalized centers; NaN means the original position. */
 final class TouchLayout {
     static final float MIN_SIZE = 0.5f, MAX_SIZE = 2.0f;
     static final String[] IDS = {
@@ -21,6 +21,7 @@ final class TouchLayout {
     private final float[] sizes = new float[IDS.length];
     private final float[] x = new float[IDS.length];
     private final float[] y = new float[IDS.length];
+    private float opacity = 1f;
 
     TouchLayout() {
         for (int i = 0; i < IDS.length; i++) {
@@ -34,7 +35,15 @@ final class TouchLayout {
         System.arraycopy(sizes, 0, result.sizes, 0, sizes.length);
         System.arraycopy(x, 0, result.x, 0, x.length);
         System.arraycopy(y, 0, result.y, 0, y.length);
+        result.opacity = opacity;
         return result;
+    }
+
+    float getOpacity() { return opacity; }
+    void setOpacity(float value) {
+        if (!Float.isFinite(value) || value < 0 || value > 1)
+            throw new IllegalArgumentException("Invalid button opacity");
+        opacity = value;
     }
 
     float getSize(int index) { return sizes[index]; }
@@ -81,6 +90,8 @@ final class TouchLayout {
                 throw new IOException("Unsupported touch layout");
             }
             TouchLayout layout = new TouchLayout();
+            if (root.hasAttribute("opacity"))
+                layout.setOpacity(Float.parseFloat(root.getAttribute("opacity")));
             boolean[] seen = new boolean[IDS.length];
             NodeList buttons = root.getElementsByTagName("button");
             if (buttons.getLength() < 9 || buttons.getLength() > IDS.length) throw new IOException("Missing buttons");
@@ -112,7 +123,8 @@ final class TouchLayout {
     }
 
     void write(OutputStream output) throws IOException {
-        StringBuilder xml = new StringBuilder("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<touch-controls version=\"1\">\n");
+        StringBuilder xml = new StringBuilder("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<touch-controls version=\"1\" opacity=\"");
+        xml.append(opacity).append("\">\n");
         for (int i = 0; i < IDS.length; i++) {
             xml.append("  <button id=\"").append(IDS[i]).append("\" size=\"").append(sizes[i]);
             if (hasPosition(i)) {

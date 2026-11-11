@@ -71,6 +71,12 @@ final class RaceControlsView extends View {
         invalidate();
     }
     TouchLayout getLayout() { return layout.copy(); }
+    float getButtonOpacity() { return layout.getOpacity(); }
+    void setButtonOpacity(float opacity) {
+        if (!editing) return;
+        layout.setOpacity(opacity);
+        invalidate();
+    }
     void beginEditing() {
         cancelInput();
         selectedButton = -1;
@@ -272,7 +278,7 @@ final class RaceControlsView extends View {
         for (int i = 0; i < bounds.length; i++) {
             if (!buttonAvailable(i)) continue;
             boolean down = (held & (1 << i)) != 0 || (editing && selectedButton == i);
-            artwork.draw(canvas, i, bounds[i], down);
+            artwork.draw(canvas, i, bounds[i], down, layout.getOpacity());
         }
     }
 

@@ -135,6 +135,10 @@ heading if it covers the area you want to use. Save applies and persists the
 layout; Cancel, Android Back, or leaving the activity restores the previous
 layout. Reset restores the original arrangement and requires Save to persist.
 The editor works even when the race overlay is currently hidden.
+Editor instructions, button labels, preset dialogs and user-facing errors use
+the same Android locale resources as the launcher: Russian for the Russian
+locale and English by default. Saved button IDs and user-defined preset names
+are independent of the UI language.
 
 `touch-controls.xml` is stored in `GameActivity.gameDirectory()`, beside
 `nfsu1.log` (normally the app's external files directory). This is the writable
@@ -146,8 +150,17 @@ Artwork and the touch hit area resize together; Cancel and Reset cover sizes too
 when rendered. Missing or invalid files fall back to defaults. AtomicFile keeps
 the previous file recoverable if a write is interrupted.
 
-`TouchLayout` owns positions and the XML format; `TouchLayoutStore` owns Android
-file persistence. The same `RaceControlsView` draws and places buttons in both
+The **Непрозрачность кнопок** slider changes all buttons immediately (0–100%).
+At 0% the artwork is invisible and the touch areas remain active; 100% preserves
+the original idle and pressed appearance. The editor toolbar and grid stay visible.
+Save persists opacity with the layout; Cancel restores the previous value and
+Reset restores 100%. Version 1 accepts an optional root `opacity` attribute in
+[0,1], defaulting to 1 for older layouts. Non-finite and out-of-range values are
+rejected.
+
+`TouchLayout` owns opacity, sizes, positions and the XML format;
+`TouchLayoutStore` owns Android file persistence. The same `RaceControlsView`
+draws and places buttons in both
 the editor and races, so editing does not duplicate button artwork or hit tests.
 The native Controller row publishes a one-shot request; the Android UI thread
 owns the editor. While editing, touch output and guest gamepad state are cleared
@@ -167,8 +180,9 @@ and check tablet and wide-phone placement.
 ### Named presets
 
 The editor's **Пресеты** button opens a library with Save under name, Load,
-Import XML, Export XML and Delete. Presets include positions and individual
-button sizes. Names can contain Unicode and spaces (up to 48 characters);
+Import XML, Export XML and Delete. Presets include positions, individual
+button sizes and the shared opacity. Names can contain Unicode and spaces
+(up to 48 characters);
 path separators, control characters and reserved filename characters are rejected.
 Existing names require confirmation before replacement.
 
@@ -191,8 +205,9 @@ permission is required. The editor remains open while either picker is active.
 preset dialogs and Android document exchange. The activity forwards picker
 results and preserves the editing session across the picker pause/resume.
 
-Host checks cover XML/size round trips, invalid XML, legacy files, unsafe names,
-library sorting, duplicate backup entries and discovery of recoverable backups.
+Host checks cover XML/size/opacity round trips, opacity limits, invalid XML,
+legacy files, unsafe names, library sorting, duplicate backup entries and
+discovery of recoverable backups.
 Actual Android AtomicFile writes, document-provider import/export, picker
 cancellation and background/recreation behavior still require device validation.
 

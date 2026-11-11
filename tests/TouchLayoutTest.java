@@ -19,6 +19,8 @@ public final class TouchLayoutTest {
 
     public static void main(String[] args) throws Exception {
         TouchLayout layout = new TouchLayout();
+        if (layout.getOpacity() != 1f) throw new AssertionError("Default opacity must preserve artwork");
+        layout.setOpacity(0.6f);
         int reset = 10;
         layout.setPosition(1, 0.81f, 0.72f);
         layout.setSize(1, 1.5f);
@@ -26,6 +28,9 @@ public final class TouchLayoutTest {
         layout.setPosition(reset, 0.25f, 0.1f);
         layout.setSize(reset, 1.25f);
         TouchLayout copy = layout.copy();
+        if (copy.getOpacity() != 0.6f) throw new AssertionError("Copy lost opacity");
+        copy.setOpacity(0.2f);
+        if (layout.getOpacity() != 0.6f) throw new AssertionError("Opacity copy aliases original");
         copy.setSize(1, 2f);
         if (layout.getSize(1) != 1.5f) throw new AssertionError("Size copy aliases original");
         copy.setPosition(1, 0.1f, 0.2f);
@@ -34,6 +39,7 @@ public final class TouchLayoutTest {
         layout.write(output);
         String xml = output.toString("UTF-8");
         TouchLayout restored = read(xml);
+        if (restored.getOpacity() != 0.6f) throw new AssertionError("Round trip changed opacity");
         if (restored.getX(1) != 0.81f || restored.getY(1) != 0.72f
                 || restored.hasPosition(0)) throw new AssertionError("Round trip changed layout");
         if (restored.getSize(1) != 1.5f || restored.getSize(0) != 0.5f)
@@ -43,6 +49,18 @@ public final class TouchLayoutTest {
             throw new AssertionError("Round trip changed reset button");
         TouchLayout legacy = read(xml.replaceAll(" size=\"[^\"]*\"", ""));
         if (legacy.getSize(1) != 1f) throw new AssertionError("Legacy size must default to 1");
+        TouchLayout legacyOpacity = read(xml.replace(" opacity=\"0.6\"", ""));
+        if (legacyOpacity.getOpacity() != 1f)
+            throw new AssertionError("Legacy opacity must preserve artwork");
+        for (String value : new String[] {"NaN", "Infinity", "-0.1", "1.1", "", "invalid"})
+            invalid(xml.replace("opacity=\"0.6\"", "opacity=\"" + value + "\""));
+        for (float opacity : new float[] {0f, 1f}) {
+            layout.setOpacity(opacity);
+            output.reset();
+            layout.write(output);
+            if (read(output.toString("UTF-8")).getOpacity() != opacity)
+                throw new AssertionError("Round trip changed boundary opacity");
+        }
         invalid(xml.replace("size=\"1.5\"", "size=\"NaN\""));
         invalid(xml.replace("size=\"1.5\"", "size=\"2.1\""));
         invalid(xml.replace("size=\"1.5\"", "size=\"0\""));
