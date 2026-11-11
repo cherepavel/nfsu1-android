@@ -1,5 +1,57 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="touch_editor_instructions">Перетащите кнопки • панель тоже можно двигать</string>
+    <string name="touch_editor_save">Сохранить</string>
+    <string name="touch_editor_reset">Сброс</string>
+    <string name="touch_editor_cancel">Отмена</string>
+    <string name="touch_editor_save_failed">Не удалось сохранить раскладку</string>
+    <string name="touch_editor_snap_to_grid">Привязка к сетке</string>
+    <string name="touch_editor_select_button">Выберите кнопку для изменения размера</string>
+    <string name="touch_editor_presets">Пресеты</string>
+    <string name="touch_button_size">Размер кнопки</string>
+    <string name="touch_button_size_percent">%1$s • %2$d%%</string>
     <string name="touch_button_opacity">Непрозрачность кнопок</string>
     <string name="touch_button_opacity_percent">Непрозрачность кнопок • %1$d%%</string>
+    <!-- Same order as TouchLayout.IDS. These labels do not change saved button IDs. -->
+    <string-array name="touch_button_names">
+        <item>Меню</item>
+        <item>Газ</item>
+        <item>Тормоз</item>
+        <item>Ручник</item>
+        <item>Передача вверх</item>
+        <item>Передача вниз</item>
+        <item>Нитро</item>
+        <item>Влево</item>
+        <item>Вправо</item>
+        <item>Камера</item>
+        <item>Возврат машины</item>
+    </string-array>
+    <string name="touch_presets_title">Пресеты управления</string>
+    <string-array name="touch_preset_actions">
+        <item>Сохранить под именем</item>
+        <item>Загрузить</item>
+        <item>Импорт XML</item>
+        <item>Экспорт XML</item>
+        <item>@string/touch_preset_delete</item>
+    </string-array>
+    <string name="touch_presets_close">Закрыть</string>
+    <string name="touch_preset_name">Имя пресета</string>
+    <string name="touch_preset_name_hint">Например: Планшет</string>
+    <string name="touch_preset_invalid_name">Используйте 1–48 символов без запрещённых знаков и точек в начале или конце</string>
+    <string name="touch_preset_overwrite_question">Перезаписать «%1$s»?</string>
+    <string name="touch_preset_overwrite">Перезаписать</string>
+    <string name="touch_preset_saved">Пресет сохранён: %1$s</string>
+    <string name="touch_preset_save_failed">Не удалось сохранить пресет</string>
+    <string name="touch_preset_list_failed">Не удалось прочитать список пресетов</string>
+    <string name="touch_presets_empty">Сохранённых пресетов пока нет</string>
+    <string name="touch_preset_delete_title">Удалить пресет</string>
+    <string name="touch_preset_load_title">Загрузить пресет</string>
+    <string name="touch_preset_delete_question">Удалить «%1$s»?</string>
+    <string name="touch_preset_delete">Удалить</string>
+    <string name="touch_preset_delete_failed">Не удалось удалить пресет</string>
+    <string name="touch_preset_load_failed">Пресет повреждён или недоступен</string>
+    <string name="touch_preset_picker_unavailable">Системный выбор файлов недоступен</string>
+    <string name="touch_preset_exported">Пресет экспортирован</string>
+    <string name="touch_preset_import_failed">Не удалось импортировать пресет</string>
+    <string name="touch_preset_export_failed">Не удалось экспортировать пресет</string>
 </resources>

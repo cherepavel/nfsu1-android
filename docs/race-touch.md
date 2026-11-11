@@ -135,6 +135,10 @@ heading if it covers the area you want to use. Save applies and persists the
 layout; Cancel, Android Back, or leaving the activity restores the previous
 layout. Reset restores the original arrangement and requires Save to persist.
 The editor works even when the race overlay is currently hidden.
+Editor instructions, button labels, preset dialogs and user-facing errors use
+the same Android locale resources as the launcher: Russian for the Russian
+locale and English by default. Saved button IDs and user-defined preset names
+are independent of the UI language.
 
 `touch-controls.xml` is stored in `GameActivity.gameDirectory()`, beside
 `nfsu1.log` (normally the app's external files directory). This is the writable

@@ -1,5 +1,57 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="touch_editor_instructions">Drag buttons • drag the heading to move this panel</string>
+    <string name="touch_editor_save">Save</string>
+    <string name="touch_editor_reset">Reset</string>
+    <string name="touch_editor_cancel">Cancel</string>
+    <string name="touch_editor_save_failed">Could not save the layout</string>
+    <string name="touch_editor_snap_to_grid">Snap to grid</string>
+    <string name="touch_editor_select_button">Select a button to resize it</string>
+    <string name="touch_editor_presets">Presets</string>
+    <string name="touch_button_size">Button size</string>
+    <string name="touch_button_size_percent">%1$s • %2$d%%</string>
     <string name="touch_button_opacity">Button opacity</string>
     <string name="touch_button_opacity_percent">Button opacity • %1$d%%</string>
+    <!-- Same order as TouchLayout.IDS. These labels do not change saved button IDs. -->
+    <string-array name="touch_button_names">
+        <item>Menu</item>
+        <item>Accelerate</item>
+        <item>Brake</item>
+        <item>Handbrake</item>
+        <item>Shift up</item>
+        <item>Shift down</item>
+        <item>Nitro</item>
+        <item>Left</item>
+        <item>Right</item>
+        <item>Camera</item>
+        <item>Reset car</item>
+    </string-array>
+    <string name="touch_presets_title">Control presets</string>
+    <string-array name="touch_preset_actions">
+        <item>Save as</item>
+        <item>Load</item>
+        <item>Import XML</item>
+        <item>Export XML</item>
+        <item>@string/touch_preset_delete</item>
+    </string-array>
+    <string name="touch_presets_close">Close</string>
+    <string name="touch_preset_name">Preset name</string>
+    <string name="touch_preset_name_hint">For example: Tablet</string>
+    <string name="touch_preset_invalid_name">Use 1–48 characters without reserved symbols or leading or trailing dots</string>
+    <string name="touch_preset_overwrite_question">Overwrite “%1$s”?</string>
+    <string name="touch_preset_overwrite">Overwrite</string>
+    <string name="touch_preset_saved">Preset saved: %1$s</string>
+    <string name="touch_preset_save_failed">Could not save the preset</string>
+    <string name="touch_preset_list_failed">Could not read the preset list</string>
+    <string name="touch_presets_empty">No saved presets yet</string>
+    <string name="touch_preset_delete_title">Delete preset</string>
+    <string name="touch_preset_load_title">Load preset</string>
+    <string name="touch_preset_delete_question">Delete “%1$s”?</string>
+    <string name="touch_preset_delete">Delete</string>
+    <string name="touch_preset_delete_failed">Could not delete the preset</string>
+    <string name="touch_preset_load_failed">The preset is invalid or unavailable</string>
+    <string name="touch_preset_picker_unavailable">The system file picker is unavailable</string>
+    <string name="touch_preset_exported">Preset exported</string>
+    <string name="touch_preset_import_failed">Could not import the preset</string>
+    <string name="touch_preset_export_failed">Could not export the preset</string>
 </resources>
