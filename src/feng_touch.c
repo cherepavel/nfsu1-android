@@ -12,7 +12,6 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
-#include <time.h>
 #define NFSU1_GAMEFLOW_STATE 0x00283434u
 extern int xbox_video_widescreen(void);
 /* The retail Xbox FEng retains its native mouse dispatcher (D8730), focus
@@ -522,6 +521,22 @@ static uint32_t s_difficulty_screen, s_difficulty_choice;
 
 static int touch_selection_bounds(uint32_t object, uint32_t package, TouchBounds *area);
 
+static void touch_paint_context(uint32_t screen, TouchTarget *target)
+{
+    target->palette_channel = MEM32(screen + 0xB20);
+    target->palette_part = MEM32(screen + 0xB14);
+    target->palette_material = MEM32(screen + 0xB24);
+}
+
+static int touch_paint_context_live(const TouchTarget *target)
+{
+    uint32_t screen = target->screen;
+    return touch_guest_range(screen, 0xB28) &&
+        MEM32(screen + 0xB20) == target->palette_channel &&
+        MEM32(screen + 0xB14) == target->palette_part &&
+        MEM32(screen + 0xB24) == target->palette_material;
+}
+
 static int touch_screen_control(uint32_t screen, uint32_t objects, uint32_t count,
                                 TouchTarget *target)
 {
@@ -583,6 +598,32 @@ static int touch_screen_control(uint32_t screen, uint32_t objects, uint32_t coun
         }
     }
     if (type == 0x001FDD74u) {
+        touch_paint_context(screen, target);
+        /* ColorPicker's material arrows and adjacent trigger glyphs send
+         * Pad_Button2/3. Left/Right would move the palette cursor instead.
+         * C8A10 owns material wrapping, palette rebuilds and availability. */
+        static const char *const names[2][2] = {
+            { "PrevMaterialArrow", "ColorCategoryLeftButton" },
+            { "NextMaterialArrow", "ColorCategoryRightButton" }
+        };
+        for (unsigned side = 0; side < 2; side++) {
+            uint32_t hit = 0;
+            TouchBounds area = {0};
+            for (unsigned i = 0; i < 2; i++) {
+                uint32_t object = touch_rendered_object(touch_name_hash(names[side][i]));
+                TouchBounds bounds;
+                if (!object || (MEM32(object + 0x1C) & 0x04000000u) ||
+                    !touch_object_bounds(object, &bounds, 0)) continue;
+                if (!hit) { area = bounds; hit = object; }
+                else touch_bounds_include(&area, &bounds);
+            }
+            float x = s_touch_x + 320.0f, y = s_touch_y + 240.0f;
+            if (!hit || x < area.left - 8 || x >= area.right + 8 ||
+                y < area.top - 8 || y >= area.bottom + 8) continue;
+            target->target = hit;
+            target->message = side ? 0xC519BFC2u : 0xC519BFC1u;
+            return 1;
+        }
         /* Reuse the paint palette's native Select for each vinyl channel,
          * then its purchase/confirmation dialog. No touch-specific commit. */
         for (unsigned i = 0; i < s_touch_bounds_count; i++) {
@@ -866,13 +907,12 @@ void feng_touch_hit(void)
 /* All paint categories use ColorPicker; B14 remains owned by the native
  * controller, including availability, price and confirmation dialogs. */
 static uint32_t s_paint_screen, s_paint_entry, s_paint_color;
-static uint32_t s_paint_channel, s_paint_part;
-static uint64_t s_paint_tap_ms;
+static uint32_t s_paint_channel, s_paint_part, s_paint_material;
 
 static void touch_paint_reset(void)
 {
     s_paint_screen = s_paint_entry = s_paint_color = 0;
-    s_paint_channel = s_paint_part = 0;
+    s_paint_channel = s_paint_part = s_paint_material = 0;
 }
 
 static int touch_paint_capture(uint32_t screen, TouchTarget *target, float x, float y)
@@ -889,8 +929,7 @@ static int touch_paint_capture(uint32_t screen, TouchTarget *target, float x, fl
         target->target = object;
         target->message = 1; /* palette selection, no purchase/accept */
         target->palette_entry = entry;
-        target->palette_channel = MEM32(screen + 0xB20);
-        target->palette_part = MEM32(screen + 0xB14);
+        touch_paint_context(screen, target);
         touch_target_begin(target, screen, s_touch_x, s_touch_y);
         return 1;
     }
@@ -903,20 +942,19 @@ static void touch_paint_select(const TouchTarget *target)
     uint32_t row = MEM32(entry + 0x24), column = MEM32(entry + 0x28);
     if (row >= 6 || column >= 10 || !MEM32(entry + 0x10) ||
         MEM32(entry + 0xC) != target->target ||
-        MEM32(screen + 0xB20) != target->palette_channel ||
-        MEM32(screen + 0xB14) != target->palette_part) { touch_paint_reset(); return; }
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    uint64_t ms = (uint64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+        !touch_paint_context_live(target)) { touch_paint_reset(); return; }
     uint32_t color = MEM32(entry + 0x10);
+    /* Let the player inspect the preview before tapping it again to buy.
+     * Native Select retains the game's lock, price and confirmation checks. */
     int accept = s_paint_screen == screen && s_paint_entry == entry &&
         s_paint_color == color && s_paint_channel == target->palette_channel &&
-        s_paint_part == target->palette_part && ms - s_paint_tap_ms <= 350 &&
+        s_paint_part == target->palette_part &&
+        s_paint_material == target->palette_material &&
         MEM32(screen + 0xB08) == row && MEM32(screen + 0xB0C) == column;
     s_paint_screen = screen; s_paint_entry = entry; s_paint_color = color;
-    s_paint_tap_ms = ms;
     s_paint_channel = target->palette_channel;
     s_paint_part = target->palette_part;
+    s_paint_material = target->palette_material;
     MEM32(screen + 0xB08) = row;
     MEM32(screen + 0xB0C) = column;
     PUSH32(esp, 0); ecx = screen; sub_000C74C0();
@@ -950,6 +988,11 @@ static void touch_execute_action(TouchTarget *target, uint32_t message,
         touch_paint_select(target);
     } else if (target->screen) {
         int valid = 1;
+        if (MEM32(target->screen) == 0x001FDD74u && target->screen_control &&
+            !touch_paint_context_live(target)) {
+            touch_paint_reset();
+            valid = 0;
+        }
         if (target->magazine_slot && message == 0x406415E3u)
             valid = touch_magazine_select(target);
         if (valid && (target->list_entry || target->carousel_sync || target->vinyl_layer) &&

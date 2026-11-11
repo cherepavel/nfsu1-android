@@ -687,13 +687,39 @@ of overlay editing with no pad. Device visual acceptance remains pending.
 ### Shared paint palette touch
 
 All paint categories use the ColorPicker adapter in `feng_touch.c`. A tap
-previews a populated rendered swatch. Two taps on the same swatch within
-350 ms send native Select, preserving the controller's availability and
-purchase flow. A different color starts a new pair; empty cells, drags,
-cancellation and leaving the screen clear the pending pair. Confirmation
-consumes the pair, so a third tap cannot confirm again. Synthetic coverage
-checks preview, empty cells, drag cancellation, double tap and third tap.
+previews a populated rendered swatch. A second tap on that selected swatch
+sends native Select, preserving the controller's availability and purchase
+flow. The player can inspect the preview without a double-tap timeout.
+A different color, material, part or vinyl channel starts a new pair; empty
+cells, drags, cancellation and leaving the screen clear the pending pair.
+Confirmation consumes the pair, so a third tap cannot confirm again.
+Synthetic coverage checks preview, empty cells, drag cancellation, repeated
+taps after inspection and third-tap behavior.
 Device validation across paint categories remains pending.
+
+### Paint material arrows and Underground confirmation
+
+ColorPicker.fng supplies PrevMaterialArrow / NextMaterialArrow and the adjacent
+ColorCategoryLeftButton / ColorCategoryRightButton trigger glyphs. Touch joins
+each rendered pair, including its gap, with eight logical pixels of tolerance.
+On release it sends Pad_Button2 (C519BFC1) or Pad_Button3 (C519BFC2) through
+DE540 to C8A10. That handler wraps material index +B24 and rebuilds the palette
+through C80D0. Ordinary Left/Right would navigate swatches instead.
+
+Swatch and material-control gestures capture material +B24, vinyl channel +B20
+and part +B14. A change before release cancels the action; a material change
+also prevents a pending second tap from confirming a reused swatch record.
+The old 350 ms confirmation limit is removed, so a second tap can follow an
+inspection pause. Select still reaches C8A10's availability/ownership checks
+(C6540 / C67F0) and its original purchase dialog (C9820). Only that dialog's
+native callback applies the paint; touch never sends INSTALL_PAINT directly.
+
+Synthetic coverage checks arrows, trigger glyphs, gaps, release-only dispatch,
+drag cancellation, hidden/disabled arrows, stale material releases, a reused
+swatch across materials, confirmation after a pause and the existing vinyl
+channel workflow. Host focus/geometry, queue/mapping and gesture regressions
+passed; `./build_debug.sh` produced the debug APK. Physical-device purchase
+and material acceptance remain pending.
 
 ### TJ and Samantha unique rewards
 
