@@ -135,28 +135,52 @@ public final class GameActivity extends SDLActivity {
         android.widget.SeekBar sizeSlider = new android.widget.SeekBar(this);
         sizeSlider.setMax(Math.round((TouchLayout.MAX_SIZE - TouchLayout.MIN_SIZE)*100));
         toolbar.addView(sizeSlider);
-        Runnable updateSize = new Runnable() {
+        android.widget.LinearLayout opacityRow = new android.widget.LinearLayout(this);
+        opacityRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        android.widget.TextView opacityLabel = new android.widget.TextView(this);
+        opacityLabel.setTextColor(android.graphics.Color.WHITE);
+        opacityRow.addView(opacityLabel);
+        android.widget.SeekBar opacitySlider = new android.widget.SeekBar(this);
+        opacitySlider.setMax(100);
+        opacitySlider.setContentDescription(getString(R.string.touch_button_opacity));
+        opacityRow.addView(opacitySlider, new android.widget.LinearLayout.LayoutParams(
+                0, android.view.ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        toolbar.addView(opacityRow);
+        Runnable updateEditor = new Runnable() {
             @Override public void run() {
                 int selected = raceControls.getSelectedButton();
                 sizeSlider.setEnabled(selected >= 0);
                 sizeSlider.setProgress(Math.round((raceControls.getSelectedSize() - TouchLayout.MIN_SIZE)*100));
                 sizeLabel.setText(selected < 0 ? "Выберите кнопку для изменения размера"
                         : TouchLayout.IDS[selected] + " • " + Math.round(raceControls.getSelectedSize()*100) + "%");
+                int opacityPercent = Math.round(raceControls.getButtonOpacity()*100);
+                opacitySlider.setProgress(opacityPercent);
+                opacityLabel.setText(getString(R.string.touch_button_opacity_percent, opacityPercent));
             }
         };
-        raceControls.setSelectionChanged(updateSize);
+        raceControls.setSelectionChanged(updateEditor);
         sizeSlider.setOnSeekBarChangeListener(new android.widget.SeekBar.OnSeekBarChangeListener() {
             @Override public void onProgressChanged(android.widget.SeekBar slider, int progress, boolean fromUser) {
                 if (fromUser) {
                     raceControls.resizeSelected(TouchLayout.MIN_SIZE + progress/100f);
-                    updateSize.run();
+                    updateEditor.run();
                 }
             }
             @Override public void onStartTrackingTouch(android.widget.SeekBar slider) { }
             @Override public void onStopTrackingTouch(android.widget.SeekBar slider) { }
         });
-        updateSize.run();
-        touchPresets = new TouchPresetController(this, raceControls, gameDirectory(), updateSize);
+        opacitySlider.setOnSeekBarChangeListener(new android.widget.SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(android.widget.SeekBar slider, int progress, boolean fromUser) {
+                if (fromUser) {
+                    raceControls.setButtonOpacity(progress/100f);
+                    updateEditor.run();
+                }
+            }
+            @Override public void onStartTrackingTouch(android.widget.SeekBar slider) { }
+            @Override public void onStopTrackingTouch(android.widget.SeekBar slider) { }
+        });
+        updateEditor.run();
+        touchPresets = new TouchPresetController(this, raceControls, gameDirectory(), updateEditor);
         addEditorButton(actions, "Пресеты", new View.OnClickListener() {
             @Override public void onClick(View view) { touchPresets.show(); }
         });
