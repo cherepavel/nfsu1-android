@@ -85,6 +85,8 @@ file(GLOB RECOMP_GEN_SOURCES CONFIGURE_DEPENDS "${NFSU2_GEN_DIR}/*.c")
 set(GAME_SOURCES
     src/main.c
     src/recomp_manual.c
+    src/widescreen.c
+    src/widescreen_guest.c
     src/movie_yuv.c
     src/culling_native.c
     src/matrix_native.c
@@ -175,7 +177,8 @@ else()
     set_source_files_properties(${RECOMP_GEN_SOURCES} PROPERTIES
         COMPILE_OPTIONS "${NFSU2_GEN_FLAGS}")
     set_source_files_properties(src/movie_yuv.c PROPERTIES COMPILE_OPTIONS "-O2")
-    set_source_files_properties(src/culling_native.c src/matrix_native.c PROPERTIES
+    set_source_files_properties(src/culling_native.c src/matrix_native.c
+        src/widescreen.c src/widescreen_guest.c PROPERTIES
         COMPILE_OPTIONS "-O2;-ffp-contract=off;-fno-strict-aliasing")
     set_source_files_properties(src/d3d_fence_wait.c PROPERTIES COMPILE_OPTIONS "-O2")
     target_link_libraries(${PROJECT_NAME} PRIVATE m)

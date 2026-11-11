@@ -133,6 +133,25 @@ int main(int argc,char **argv)
     assert(!nv2a_ui_marker(0,0x100,5,&begin)); /* ordinary NOP trap untouched */
     assert(!nv2a_ui_marker(1,0x100,NV2A_UI_BEGIN,&begin));
     assert(!nv2a_ui_marker(0,0x104,NV2A_UI_BEGIN,&begin));
+    /* Adaptive presentation and native UI must use the very same full
+     * upright output, including AA targets and after a display resize. */
+    xbox_video_set_adaptive_widescreen(1);
+    *s=(VkSurf){.va=0x1000,.w=1280,.h=480,.pw=3200,.ph=1800,.aa_sx=2,.aa_sy=1,
+        .image=current,.view=(VkImageView)(uintptr_t)2,.mem=(VkDeviceMemory)(uintptr_t)3,
+        .screen_seen=1,.screen_frame=s_frame};
+    rect=native_ui_output_rect(s);
+    assert(rect.offset.x==0&&rect.offset.y==0&&rect.extent.width==2400&&rect.extent.height==1080);
+    native_ui_phase(1);
+    native_ui_select(s,1,0);
+    assert(s_native_ui[0].active&&s->pw==2400&&s->ph==1080);
+    s_sc_logical_extent=(VkExtent2D){1920,1200};
+    native_ui_select(s,1,0);
+    assert(s_native_ui[0].active&&s->pw==1920&&s->ph==1200);
+    native_ui_select(s,0,0);
+    assert(!s_native_ui[0].active&&s->pw==3200&&s->ph==1800);
+    xbox_video_set_adaptive_widescreen(0);
+    rect=native_ui_output_rect(s);
+    assert(rect.extent.width==1920&&rect.extent.height==1080&&rect.offset.y==60);
     assert(s_native_ui_draws==0&&ends&&barriers);
     puts("Native UI: ordered markers, output dimensions, image lifetime, full/partial clears and restore: PASS");
 }

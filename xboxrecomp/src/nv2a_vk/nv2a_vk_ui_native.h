@@ -1,6 +1,7 @@
 /* Opt-in output-sized UI on the renderer thread, with an ordered game marker.
  * Each guest surface retains its high-resolution image in the alternate slot.
  * Only color-only UI draws may switch; depth/stencil storage is never resized. */
+#include "../kernel/video_layout.h"
 typedef struct {
     VkImage image;
     VkImageView view;
@@ -30,20 +31,19 @@ static int native_ui_enabled(void)
 #endif
 }
 
-/* Same logical letterbox as final presentation, independent of rotation. */
+/* Same logical content rectangle as final presentation, independent of rotation. */
 static VkRect2D native_ui_output_rect(VkSurf *s)
 {
     VkRect2D rect = {0};
     if (!s || !s->w || !s->h || !s_sc_logical_extent.width || !s_sc_logical_extent.height)
         return rect;
     float lw = (float)s->w / (float)s->aa_sx, lh = (float)s->h / (float)s->aa_sy;
-    float ww = (float)s_sc_logical_extent.width, wh = (float)s_sc_logical_extent.height;
-    if (xbox_video_widescreen() && lw < lh * 1.5f) lw = lh * 16.0f / 9.0f;
-    float k = ww / lw < wh / lh ? ww / lw : wh / lh;
-    rect.extent.width = (uint32_t)(lw * k);
-    rect.extent.height = (uint32_t)(lh * k);
-    rect.offset.x = ((int32_t)s_sc_logical_extent.width - (int32_t)rect.extent.width) / 2;
-    rect.offset.y = ((int32_t)s_sc_logical_extent.height - (int32_t)rect.extent.height) / 2;
+    XboxVideoRect output = xbox_video_output_rect(lw, lh,
+        s_sc_logical_extent.width, s_sc_logical_extent.height, xbox_video_widescreen());
+    rect.extent.width = output.width;
+    rect.extent.height = output.height;
+    rect.offset.x = output.x;
+    rect.offset.y = output.y;
     return rect;
 }
 

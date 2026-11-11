@@ -2698,6 +2698,10 @@ static int create_swapchain(void)
     NFS_LOG_INFO("graphics", "[VKROT] requested=%d failed=%d current=%u selected=%u rotation=%u logical=%ux%u buffer=%ux%u\n",
         s_android_prerotate, s_android_prerotate_failed, caps.currentTransform, ci.preTransform, s_sc_rotation,
         s_sc_logical_extent.width, s_sc_logical_extent.height, s_sc_extent.width, s_sc_extent.height);
+    xbox_video_set_output_size(s_sc_logical_extent.width, s_sc_logical_extent.height);
+    NFS_LOG_INFO("graphics", "[WIDE] adaptive=%d output=%ux%u aspect=%.6f\n",
+        xbox_video_adaptive_widescreen(), s_sc_logical_extent.width, s_sc_logical_extent.height,
+        xbox_video_output_aspect());
 #endif
     return 1;
 }
