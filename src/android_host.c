@@ -22,6 +22,8 @@
 #include "android_input_trace.h"
 #include "android_logs.h"
 #include "android_runtime_options.h"
+#include "../xboxrecomp/src/kernel/video_layout.h"
+#include "widescreen.h"
 #include <fcntl.h>
 
 int android_host_boot(int argc, char **argv)
@@ -60,6 +62,9 @@ int android_host_boot(int argc, char **argv)
     if (log_flags >= 0) fcntl(fileno(stdout), F_SETFL, log_flags | O_APPEND);
     if (!android_logs_start())
         NFS_LOG_WARN("system", "zlog unavailable; using nfsu1.log only");
+    char adaptive_wide[PROP_VALUE_MAX] = {0};
+    __system_property_get("debug.nfsu.adaptive_wide", adaptive_wide);
+    nfsu_widescreen_configure(adaptive_wide);
     NFS_LOG_INFO("system", "[ANDROID] input trace=%d (RECOMP_INPUT_TRACE)\n",
             android_input_trace_enabled());
     setenv("RECOMP_QUIET", "1", 0);
@@ -130,6 +135,8 @@ JNIEXPORT void JNICALL Java_org_nfsu_android_GameActivity_nativeSurfaceChanged(
     host_window.window = window;
     host_window.width = width;
     host_window.height = height;
+    if (window && width > 0 && height > 0)
+        xbox_video_set_output_size((uint32_t)width, (uint32_t)height);
     menu_touch_cancel();
     race_touch_cancel();
     if (old != window) host_window.generation++;

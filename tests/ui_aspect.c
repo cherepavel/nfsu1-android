@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "recomp_types.h"
+#include "../xboxrecomp/src/kernel/video_layout.h"
 
 ptrdiff_t g_xbox_mem_offset;
 RECOMP_TLS uint32_t g_esp, g_ecx;
@@ -12,10 +13,15 @@ static int wide = 1;
 static float expected_x[4], expected_y[4], expected_projection;
 static int draws;
 static float expected_hud;
+static float expected_projection_y;
+static int projection_3d;
+static int native_output;
+static float hud_scale = 0.75f, hud_shift = 640.0f / 6.0f;
 
 int xbox_video_widescreen(void) { return wide; }
 void sub_000192C0(void);
 void sub_00018E40(void);
+void sub_00018E60(void);
 void sub_00016460(void);
 void sub_0014B510(void);
 void sub_000F8B80(void);
@@ -46,8 +52,35 @@ void sub_000192C0_gen(void)
 
 void sub_00018E40_gen(void)
 {
-    assert(read_float(g_ecx + 0x40) == expected_projection);
+    assert(fabsf(read_float(g_ecx + 0x40) - expected_projection) < 0.00001f);
+    if (projection_3d) {
+        assert(fabsf(read_float(g_ecx + 0x54) - expected_projection_y) < 0.00001f);
+        /* Near/far and homogeneous terms must survive the correction. */
+        assert(read_float(g_ecx + 0x68) == 1.0001f);
+        assert(read_float(g_ecx + 0x6c) == 1.0f);
+        assert(read_float(g_ecx + 0x78) == -0.10001f);
+        assert(read_float(g_ecx) == 1.0f && read_float(g_ecx + 0x28) == 1.0f);
+    }
     g_esp += 4;
+}
+
+/* Real projection builder calls the wrapped product before frustum planes
+ * are extracted. Deliberately use focal scales whose ratio is not 4:3. */
+void sub_00018E60_gen(void)
+{
+    uint32_t caller_sp = g_esp;
+    /* A native 4:3 garage must also keep the original camera angle. */
+    for (int i = 0; i < 16; i++) put_float(g_ecx + i * 4, i % 5 == 0 ? 1.0f : 0.0f);
+    put_float(g_ecx + 0x40, 1.13f);
+    put_float(g_ecx + 0x54, -1.79f);
+    put_float(g_ecx + 0x68, 1.0001f);
+    put_float(g_ecx + 0x6c, 1.0f);
+    put_float(g_ecx + 0x78, -0.10001f);
+    g_esp -= 4;
+    MEM32(g_esp) = 0x1902a;
+    sub_00018E40();
+    assert(g_esp == caller_sp);
+    g_esp = caller_sp + 20;
 }
 
 static int draw_hud;
@@ -71,7 +104,7 @@ void sub_000F8B80_gen(void)
             float x = read_float(quad + 0x10 + i * 16);
             int stretch = draw_menu && wide && getenv("RECOMP_HORPLUS") == NULL &&
                           MEM32(0x283434) == 6;
-            expected_x[i] = stretch ? 320.0f + (x - 320.0f) * (4.0f / 3.0f) :
+            expected_x[i] = stretch ? 320.0f + (x - 320.0f) / hud_scale :
                                       x + cached_expected_shift;
             expected_y[i] = read_float(quad + 0x14 + i * 16);
         }
@@ -106,16 +139,16 @@ static void quad_case(float x0, float x1, float y0, float y1, int expand)
         float y = i < 2 ? y0 : y1;
         put_float(quad + 0x10 + i * 16, x);
         put_float(quad + 0x14 + i * 16, y);
-        expected_x[i] = expand == 1 ? 320.0f + (x - 320.0f) * (4.0f / 3.0f) :
-            expand == -1 ? x - 640.0f / 6.0f :
-            expand == 2 ? x + 640.0f / 6.0f : x;
+        expected_x[i] = expand == 1 ? 320.0f + (x - 320.0f) / hud_scale :
+            expand == -1 ? x - hud_shift :
+            expand == 2 ? x + hud_shift : x;
         expected_y[i] = y;
     }
     memcpy(original, (const void *)XBOX_PTR(quad), sizeof original);
     g_esp = 0x1000;
     MEM32(g_esp + 4) = quad;
     if (draw_feng) {
-        cached_expected_shift = expand == -1 ? -640.0f / 6.0f : expand == 2 ? 640.0f / 6.0f : 0.0f;
+        cached_expected_shift = expand == -1 ? -hud_shift : expand == 2 ? hud_shift : 0.0f;
         g_ecx = 0x6000;
         MEM32(0x6018) = quad - 0x10;
         MEM32(quad - 0x10) = 0x6018;
@@ -130,6 +163,18 @@ int main(int argc, char **argv)
 {
     wide = argc == 1 || strcmp(argv[1], "4:3") != 0;
     int enabled = wide && getenv("RECOMP_HORPLUS") == NULL;
+    int adaptive = argc > 1 && strcmp(argv[1], "adaptive") == 0 && enabled;
+    xbox_video_set_adaptive_widescreen(adaptive);
+    if (adaptive) {
+        unsigned width = argc > 2 ? (unsigned)atoi(argv[2]) : 2400;
+        unsigned height = argc > 3 ? (unsigned)atoi(argv[3]) : 1080;
+        xbox_video_set_output_size(width, height);
+        native_output = (float)width / height <= 4.0f / 3.0f;
+        hud_scale = (4.0f / 3.0f) * height / width;
+        hud_shift = 240.0f * width / height - 320.0f;
+        /* Equal source X/Y lengths occupy equal physical screen lengths. */
+        assert(fabsf(width / 640.0f * hud_scale - height / 480.0f) < 0.0001f);
+    }
     g_xbox_mem_offset = (ptrdiff_t)ram;
     MEM32(0x263EBC) = 0x3000;
     MEM32(0x3004) = 0;
@@ -163,7 +208,7 @@ int main(int argc, char **argv)
     unsigned char saved_first[0x90], saved_last[0x90];
     memcpy(saved_first, (void *)XBOX_PTR(0x2000), sizeof saved_first);
     memcpy(saved_last, (void *)XBOX_PTR(0x3000), sizeof saved_last);
-    cached_expected_shift = enabled ? -640.0f / 6.0f : 0;
+    cached_expected_shift = enabled ? -hud_shift : 0;
     g_ecx = 0x6000; g_esp = 0x1000;
     int before = draws;
     sub_00016460();
@@ -196,7 +241,7 @@ int main(int argc, char **argv)
             float x = i == 0 ? 100.0f : i == 1 ? 320.0f : 540.0f;
             expected_hud = x;
             if (enabled && state == 6 && i != 1)
-                expected_hud += i == 0 ? -640.0f / 6.0f : 640.0f / 6.0f;
+                expected_hud += i == 0 ? -hud_shift : hud_shift;
             g_ecx = 0x5000; g_esp = 0x1000;
             put_float(g_ecx + 0x68, x);
             sub_00016460();
@@ -216,9 +261,87 @@ int main(int argc, char **argv)
         g_esp = 0x1000; g_ecx = 0x4000;
         MEM32(g_esp) = 0x16548;
         put_float(g_ecx + 0x40, 1.0f);
-        expected_projection = enabled && state == 6 ? 0.75f : 1.0f;
+        expected_projection = enabled && state == 6 ? hud_scale : 1.0f;
         sub_00018E40();
         assert(g_esp == 0x1004);
+    }
+    /* Verify the actual wrapper's nested product, culling input and ABI.
+     * Cube faces and other non-4:3 targets retain their source projection. */
+    if (native_output) assert(!unsetenv("RECOMP_FE_YAW"));
+    else assert(!setenv("RECOMP_FE_YAW", "0", 1));
+    projection_3d = 1;
+    for (int state = 3; state <= 6; state++) {
+        MEM32(0x283434) = state;
+        for (unsigned id = 0; id <= 15; id++) {
+            MEM32(0x8058) = 0xa000;
+            MEM32(0x8004) = id;
+            MEM32(0xa01c) = id >= 10 ? 128 : id == 4 ? 320 : 640;
+            MEM32(0xa020) = id >= 10 ? 128 : id == 4 ? 240 : 480;
+            g_ecx = 0x4000; g_esp = 0x1000;
+            MEM32(g_esp + 4) = 0x8000;
+            expected_projection = 1.13f;
+            expected_projection_y = -1.79f;
+            if (enabled && id < 10) {
+                if (adaptive && !native_output) {
+                    float aspect = xbox_video_output_aspect();
+                    expected_projection = 1.79f / aspect;
+                } else if (!adaptive) {
+                    if (state == 3) expected_projection_y *= 4.0f / 3.0f;
+                    else expected_projection *= 0.75f;
+                }
+            }
+            sub_00018E60();
+            assert(g_esp == 0x1014);
+            if (adaptive && !native_output && id < 10) {
+                float pixel_ratio = fabsf(read_float(0x4040) / read_float(0x4054))
+                                    * xbox_video_output_aspect();
+                assert(fabsf(pixel_ratio - 1.0f) < 0.00001f);
+            }
+        }
+    }
+    /* The projection context cannot leak into an unrelated matrix product. */
+    g_esp = 0x1000; g_ecx = 0x4000;
+    MEM32(g_esp) = 0x1902a;
+    put_float(0x4040, 1.13f); put_float(0x4054, -1.79f);
+    expected_projection = 1.13f; expected_projection_y = -1.79f;
+    sub_00018E40();
+    assert(g_esp == 0x1004);
+    if (adaptive) {
+        assert(!setenv("RECOMP_FE_YAW", "0", 1));
+        /* A resize in the same process must update both the world FOV and
+         * cached HUD/menu geometry, without stale 16:9 coefficients. */
+        const unsigned widths[] = {1440, 1728, 1920, 2160, 2400, 2520};
+        float previous_fov[2] = {0}, projected_height[2] = {0};
+        for (unsigned i = 0; i < sizeof widths / sizeof *widths; i++) {
+            xbox_video_set_output_size(widths[i], 1080);
+            float aspect = widths[i] / 1080.0f;
+            hud_scale = (4.0f / 3.0f) / aspect;
+            hud_shift = 240.0f * aspect - 320.0f;
+            MEM32(0x283434) = 6;
+            draw_feng = 1; draw_menu = 0;
+            quad_case(450, 600, 330, 470, 2); /* racing gauge follows right edge */
+            draw_menu = 1;
+            quad_case(40, 600, 95, 360, 1); /* end-of-race menu fills width */
+            draw_menu = draw_feng = 0;
+            for (unsigned camera = 0; camera < 2; camera++) {
+                MEM32(0x283434) = camera == 0 ? 3 : 6; /* garage and race */
+                g_ecx = 0x4000; g_esp = 0x1000;
+                MEM32(g_esp + 4) = 0x8000;
+                MEM32(0x8004) = 1;
+                MEM32(0xa01c) = 640; MEM32(0xa020) = 480;
+                expected_projection = i == 0 ? 1.13f : 1.79f / aspect;
+                expected_projection_y = -1.79f;
+                sub_00018E60();
+                float fov = 2.0f * atanf(1.0f / read_float(0x4040));
+                assert(fov > previous_fov[camera]);
+                previous_fov[camera] = fov;
+                /* A fixed-height object at the same camera distance keeps
+                 * its pixel height as only the screen width changes. */
+                float height = fabsf(read_float(0x4054)) * 1080.0f / 10.0f;
+                if (!i) projected_height[camera] = height;
+                assert(fabsf(height - projected_height[camera]) < 0.00001f);
+            }
+        }
     }
     puts("UI aspect: draw coordinates, source restoration, ABI and exclusions passed");
     return 0;

@@ -14,6 +14,7 @@ set(KERNEL_SOURCES
     kernel_sync.c
     kernel_hal.c
     kernel_xbox.c
+    video_layout.c
     kernel_ob.c
     kernel_io.c
     kernel_crypto.c

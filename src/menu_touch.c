@@ -3,6 +3,7 @@
 #include <pthread.h>
 #include <string.h>
 #include "input_mode.h"
+#include "../xboxrecomp/src/kernel/video_layout.h"
 
 /* Preserve short taps between guest frames. FEng resolves hover AFTER button
  * edges, so each down must first spend one update selecting its real object. */
@@ -97,13 +98,13 @@ int menu_touch_position(const MenuTouchSample *sample, int wide, float menu_size
 {
     if (!sample->active || sample->width <= 0 || sample->height <= 0 ||
         !isfinite(menu_size) || menu_size <= 0) return 0;
-    /* Same fit and integer letterbox rounding as nv2a_vk's 640x480 present.
+    /* Same content rectangle and rounding as nv2a_vk's 640x480 present.
      * FEng descriptors use a centred 640x480 canvas, before Menu Size. */
-    float logical_width = wide ? 480.0f * 16.0f / 9.0f : 640.0f;
-    float scale = fminf(sample->width / logical_width, sample->height / 480.0f);
-    int width = (int)(logical_width * scale), height = (int)(480.0f * scale);
+    XboxVideoRect rect = xbox_video_output_rect(640, 480,
+        (uint32_t)sample->width, (uint32_t)sample->height, wide);
+    int width = (int)rect.width, height = (int)rect.height;
     if (width <= 0 || height <= 0) return 0;
-    int left = (sample->width - width) / 2, top = (sample->height - height) / 2;
+    int left = rect.x, top = rect.y;
     float px = sample->x * sample->width - left;
     float py = sample->y * sample->height - top;
     if (px < 0 || px >= width || py < 0 || py >= height) return 0;

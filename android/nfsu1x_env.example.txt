@@ -32,6 +32,9 @@ RECOMP_QUIET=1
 # RECOMP_APU_TRACE=1
 
 # Numeric/explicit switches:
+# Adaptive screen aspect + FOV; proportional racing HUD, stretched menus.
+# Default on. Set 0 for the previous presentation; restart after editing.
+# RECOMP_ADAPTIVE_WIDESCREEN=0
 # RECOMP_FPS_LOG=1
 # RECOMP_VK_TRACE=1
 # XBOX_LOG_LEVEL=3

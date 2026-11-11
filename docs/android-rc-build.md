@@ -26,6 +26,7 @@ than requiring users to reproduce the investigation's device properties.
 | Scoped render-pass consumer barrier | On on Android | debug.nfsu.pass_barrier=0, live at the next poll |
 | Early-submit draw threshold | 300, unchanged | debug.nfsu.vk_kick=N, next process |
 | Output-resolution UI experiment | Off | debug.nfsu.ui_native=1, experimental |
+| Adaptive widescreen and FOV | On; native geometry at 4:3 | debug.nfsu.adaptive_wide=0; RECOMP_ADAPTIVE_WIDESCREEN takes precedence |
 | Deferred full clears | Off | existing debug.nfsu.lazy_clear experiment |
 | GPU / cubemap timestamps | Off | existing gpu_profile / cube_profile opt-ins |
 | CPU performance counters | Off in ordinary play | debug.nfsu.perf=1, next process |

@@ -119,6 +119,17 @@ HUD scope restoration and projection selection. They do not establish visual
 correctness or race stability on a device. The revised menu behavior still
 needs device validation.
 
+The [adaptive widescreen mode](../docs/adaptive-widescreen.md) is enabled by
+default and fills the actual screen aspect instead of fitting 16:9. It adapts racing FOV,
+preserves world and racing-HUD proportions, and stretches all menus,
+including pause, results, retry, tournament continuation and rewards.
+At 4:3 it keeps native camera/HUD geometry; on wider screens both garage
+and racing cameras expand horizontal FOV while retaining vertical framing.
+The user confirmed correct widescreen behavior on a device. Set
+`debug.nfsu.adaptive_wide=0` before restarting, or
+`RECOMP_ADAPTIVE_WIDESCREEN=0` in `nfsu1x_env.txt`, to restore the previous
+presentation. The environment entry takes precedence over the property.
+
 The Android host owns the SDL window and services events on SDL's main thread,
 independently of guest flips. GameActivity is the sole owner of fullscreen policy, using WindowInsetsController
 and a decor layout that does not shrink for system bars. SDL does not request

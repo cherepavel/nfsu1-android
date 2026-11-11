@@ -1,7 +1,9 @@
 #include "input_mode.h"
 /* cc -std=c11 -Wall -Wextra -Werror -Isrc tests/menu_touch.c
- * src/menu_touch.c src/input_mode.c -pthread -lm -o /tmp/nfsu-menu-touch-test */
+ * src/menu_touch.c src/input_mode.c xboxrecomp/src/kernel/video_layout.c
+ * -pthread -lm -o /tmp/nfsu-menu-touch-test */
 #include "menu_touch.h"
+#include "../xboxrecomp/src/kernel/video_layout.h"
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
@@ -110,5 +112,25 @@ int main(void)
     input_mode_set_controller_present(0); /* physical controller removed */
     assert(input_mode_sensor_enabled() && input_mode_get().overlay_enabled);
     input_mode_configure(-1, 0);
+    /* Full-width menus use the former side bars too. Invert their stretched
+     * output, including Menu Size, independently of the racing HUD aspect. */
+    xbox_video_set_adaptive_widescreen(1);
+    sample = (MenuTouchSample){ .x = .01f, .y = .25f, .width = 2400,
+        .height = 1080, .active = 1 };
+    assert(menu_touch_position(&sample, 1, 1, &x, &y));
+    assert(x == -314 && y == -120);
+    sample.x = .99f;
+    assert(menu_touch_position(&sample, 1, 1, &x, &y));
+    assert(x == 314 && y == -120);
+    sample.x = .75f;
+    assert(menu_touch_position(&sample, 1, .8f, &x, &y));
+    assert(x == 200 && y == -150);
+    sample.width = 1920; sample.height = 1200;
+    assert(menu_touch_position(&sample, 1, 1, &x, &y));
+    assert(x == 160 && y == -120);
+    xbox_video_set_adaptive_widescreen(0);
+    sample.width = 2400; sample.height = 1080;
+    sample.x = .01f;
+    assert(!menu_touch_position(&sample, 1, 1, &x, &y));
     puts("menu touch queue and presentation mapping: OK");
 }

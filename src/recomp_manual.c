@@ -1,5 +1,6 @@
 #include "../xboxrecomp/include/nfsu_log.h"
 #include "input_mode.h"
+#include "widescreen.h"
 /**
  * Manual function overrides and ICALL diagnostics
  *
@@ -594,38 +595,13 @@ void sub_001EA5B2(void)
     esp += 4;
 }
 
-/* Hor+ 16:9. NFSU1 has no widescreen mode (its only XGetVideoFlags caller,
- * 0x16EA50, reads the PAL-60 bit), so with the TV reported 16:9 the
- * presenter stretched the 4:3 picture. The view projection (sub_00018E60,
- * thiscall: ecx = the view's matrix block, arg = the view) builds
- *   m00 = cot(fov/2), m11 = cot(fov * H/W / 2)
- * from the render target's size, then sub_00018E40 forms view*proj, and the
- * frustum planes are taken from that product. Scaling m00 by 3/4 just
- * before the product widens the picture to 16:9 at the same vertical FOV,
- * culling included. Only 4:3 targets (race 640x480, its 320x240 copy, the
- * front end): the 128x128 environment-map faces stay square.
- * RECOMP_HORPLUS=0 restores the stretched 4:3 picture. */
-extern int xbox_video_widescreen(void);
+/* Keep generated-body declarations here for the recompiler scanner.
+ * Widescreen policy and guest adapters are separate feature modules. */
 extern void sub_00018E60_gen(void);
 extern void sub_00018E40_gen(void);
-static uint32_t s_proj_view;
-static int s_ui_aspect_active;
-
-static int horplus_on(void)
-{
-    static int on = -1;
-    if (on < 0) {
-        const char *e = getenv("RECOMP_HORPLUS");
-        on = xbox_video_widescreen() && !(e && e[0] == '0');
-    }
-    return on;
-}
-
 void sub_00018E60(void)
 {
-    s_proj_view = MEM32(esp + 4);
-    sub_00018E60_gen();
-    s_proj_view = 0;
+    nfsu_widescreen_view(sub_00018E60_gen);
 }
 
 /* Game flow state: 3 in the front end, 4 loading, 6 racing (the game
@@ -688,84 +664,13 @@ void sub_000DB860(void)
 
 void sub_00018E40(void)
 {
-    uint32_t v = s_proj_view;
-    int fe;
-
-    /* The 2D pass rebuilds view 0 with Menu Size on both axes and an
-     * identity projection. Compensate the anamorphic 16:9 presentation
-     * before forming its product; the 3D camera uses the other path below. */
-    if (MEM32(esp) == 0x00016548u && horplus_on() &&
-        MEM32(NFSU1_GAMEFLOW_STATE) == 6) {
-        float m;
-        memcpy(&m, (void *)XBOX_PTR(ecx + 0x40), sizeof m);
-        m *= 0.75f;
-        memcpy((void *)XBOX_PTR(ecx + 0x40), &m, sizeof m);
-    }
-
-    if (!v || MEM32(esp) != 0x0001902Au) {
-        sub_00018E40_gen();
-        return;
-    }
-    fe = MEM32(NFSU1_GAMEFLOW_STATE) == 3;
-
-    if (horplus_on()) {
-        uint32_t rt = MEM32(v + 0x58);
-        uint32_t w = rt ? MEM32(rt + 0x1C) : 0, h = rt ? MEM32(rt + 0x20) : 0;
-        if (w && w * 3 == h * 4) {
-            /* The front end zooms instead (m11 x 4/3): its garage set
-             * ends just past the 4:3 frame -- the tunnel mouth on the
-             * right -- so it keeps the original width, minus top and
-             * bottom. */
-            uint32_t at = ecx + (fe ? 0x54 : 0x40);   /* m11 : m00 */
-            float m;
-            memcpy(&m, (void *)XBOX_PTR(at), 4);
-            m *= fe ? 4.0f / 3.0f : 0.75f;
-            memcpy((void *)XBOX_PTR(at), &m, 4);
-        }
-    }
-    /* Front-end garage camera (views 1 and 4 share it) turned left by
-     * RECOMP_FE_YAW degrees (default 5): rows 0 and 2 of the view matrix
-     * at ecx (row-major, column vectors, eye +z forward) rotated about
-     * the eye's y axis. sub_00018E60 copies the camera in afresh. */
-    if (fe && (MEM32(v + 4) == 1 || MEM32(v + 4) == 4)) {
-        static float yaw = -1000.0f;
-        if (yaw == -1000.0f) {
-            const char *e = getenv("RECOMP_FE_YAW");
-            yaw = (e ? (float)atof(e) : 5.0f) * 3.14159265f / 180.0f;
-        }
-        if (yaw != 0.0f) {
-            float m[16], c = cosf(yaw), s = sinf(yaw);
-            int j;
-            memcpy(m, (void *)XBOX_PTR(ecx), sizeof m);
-            for (j = 0; j < 4; j++) {
-                float r0 = m[j], r2 = m[8 + j];
-                m[j]     = c * r0 + s * r2;
-                m[8 + j] = -s * r0 + c * r2;
-            }
-            memcpy((void *)XBOX_PTR(ecx), m, sizeof m);
-        }
-    }
-    sub_00018E40_gen();
+    nfsu_widescreen_multiply(sub_00018E40_gen);
 }
 
-/* The minimap renderer owns a screen-space centre (+0x68) and half
- * extent (+0x70). Its draw builds the map and markers from that centre. */
 extern void sub_0014B510_gen(void);
-
 void sub_0014B510(void)
 {
-    uint32_t centre = ecx + 0x68;
-    uint32_t original = MEM32(centre);
-    float x;
-
-    memcpy(&x, &original, 4);
-    if (s_ui_aspect_active && MEM32(NFSU1_GAMEFLOW_STATE) == 6) {
-        if (x < 280.0f) x -= 640.0f / 6.0f;
-        else if (x > 360.0f) x += 640.0f / 6.0f;
-        memcpy((void *)XBOX_PTR(centre), &x, 4);
-    }
-    sub_0014B510_gen();
-    MEM32(centre) = original;
+    nfsu_widescreen_minimap(sub_0014B510_gen);
 }
 
 /* Associate cached draw geometry with its actual FEng object, including
@@ -782,30 +687,16 @@ void sub_000D9D00(void)
 #endif
 }
 
-/* FEng renders the rest of the HUD through a cached circular list of
- * quads. This path is shared by sprites and text (one quad per glyph).
- * Select one anchor from the complete object's bounds, then translate all
- * of its quads equally. Editing FEng layout descriptors would miss cached
- * geometry; selecting an anchor for each glyph would split long strings. */
 extern void sub_000F8B80_gen(void);
-static float s_feng_shift;
-static int s_feng_draw;
-static int s_feng_menu_draw;
-
-/* sub_00016460 draws FEng menus through sub_000DC090, then the racing
- * HUD through the callbacks at 0x265B8C. Game flow remains 6 for pause,
- * rewards and race results: it cannot distinguish those menus from HUD.
- * Undo the racing UI projection equally for every menu quad, including
- * glyphs, so menus retain their original stretched presentation. */
 extern void sub_000DC090_gen(void);
+extern void sub_000192C0_gen(void);
 
 #ifdef __ANDROID__
 void nfsu_controller_settings_refresh(void);
 #endif
 void sub_000DC090(void)
 {
-    int previous = s_feng_menu_draw;
-    s_feng_menu_draw = 1;
+    int previous = nfsu_widescreen_menu_begin();
 #ifdef __ANDROID__
     if (!previous) {
         nfsu_controller_settings_refresh();
@@ -816,76 +707,17 @@ void sub_000DC090(void)
 #ifdef __ANDROID__
     if (!previous) feng_touch_frame_end();
 #endif
-    s_feng_menu_draw = previous;
+    nfsu_widescreen_menu_end(previous);
 }
 
 void sub_000F8B80(void)
 {
-    uint32_t head = ecx + 0x18;
-    uint32_t node = MEM32(head);
-    float left = INFINITY, right = -INFINITY;
-    float previous_shift = s_feng_shift;
-    int previous_draw = s_feng_draw;
-    unsigned count = 0;
-
-#ifdef __ANDROID__
-    if (s_feng_menu_draw && feng_touch_draw_cache(ecx)) {
-        esp += 4; /* retain native hit geometry, omit obsolete Y glyph */
-        return;
-    }
-#endif
-    s_feng_shift = 0.0f;
-    s_feng_draw = s_ui_aspect_active;
-    if (s_feng_draw && !s_feng_menu_draw &&
-        MEM32(NFSU1_GAMEFLOW_STATE) == 6) {
-        while (node != head && node && count++ < 4096) {
-            /* List node +0x10 is the quad, its xyz vertices start +0x10. */
-            for (int i = 0; i < 4; i++) {
-                float x;
-                memcpy(&x, (void *)XBOX_PTR(node + 0x20 + i * 16), 4);
-                left = fminf(left, x); right = fmaxf(right, x);
-            }
-            node = MEM32(node);
-        }
-        if (node == head && count) {
-            float centre = (left + right) * 0.5f;
-            if (centre < 280.0f) s_feng_shift = -640.0f / 6.0f;
-            else if (centre > 360.0f) s_feng_shift = 640.0f / 6.0f;
-        }
-    }
-    sub_000F8B80_gen();
-    s_feng_shift = previous_shift;
-    s_feng_draw = previous_draw;
+    nfsu_widescreen_feng(sub_000F8B80_gen);
 }
-
-/* The racing pass has a 0.75 horizontal projection. Undo it for every
- * menu quad to preserve the original stretched 4:3 menu, including text.
- * Only racing HUD objects receive an edge shift. Restore cached geometry. */
-extern void sub_000192C0_gen(void);
 
 void sub_000192C0(void)
 {
-    uint32_t quad = MEM32(esp + 4);
-    float original_x[4];
-    float shift = s_feng_shift;
-    int i;
-    int stretch = s_feng_menu_draw;
-
-    if (!s_ui_aspect_active || (!stretch &&
-        (!s_feng_draw || shift == 0.0f))) {
-        sub_000192C0_gen();
-        return;
-    }
-    for (i = 0; i < 4; i++) {
-        float x;
-        memcpy(&x, (void *)XBOX_PTR(quad + 0x10 + i * 16), 4);
-        original_x[i] = x;
-        x = stretch ? 320.0f + (x - 320.0f) * (4.0f / 3.0f) : x + shift;
-        memcpy((void *)XBOX_PTR(quad + 0x10 + i * 16), &x, 4);
-    }
-    sub_000192C0_gen();
-    for (i = 0; i < 4; i++)
-        memcpy((void *)XBOX_PTR(quad + 0x10 + i * 16), &original_x[i], 4);
+    nfsu_widescreen_quad(sub_000192C0_gen);
 }
 
 /* ── Options -> Camera: car reflections and picture rows ──────
@@ -1668,26 +1500,23 @@ static unsigned s_ui_marker_depth;
 void sub_00016460(void)
 {
     uint32_t v = MEM32(NFSU1_MENU_SIZE);
-    int previous = s_ui_aspect_active;
     float f;
 
     memcpy(&f, &v, 4);
     if (v != s_menu_size_user && f > 0.919f && f < 0.921f)
         MEM32(NFSU1_MENU_SIZE) = 0x3F800000u;   /* 1.0f */
-    s_ui_aspect_active = horplus_on() && MEM32(NFSU1_GAMEFLOW_STATE) == 6;
 #if defined(__ANDROID__) && defined(NFSU2_VULKAN)
     int marked = 0;
     if (ui_native_marker_enabled() && s_ui_marker_depth++ == 0)
         marked = ui_native_marker_write(NV2A_UI_BEGIN);
 #endif
-    sub_00016460_gen();
+    nfsu_widescreen_ui(sub_00016460_gen);
 #if defined(__ANDROID__) && defined(NFSU2_VULKAN)
     if (ui_native_marker_enabled()) {
         if (marked) ui_native_marker_write(NV2A_UI_END);
         s_ui_marker_depth--;
     }
 #endif
-    s_ui_aspect_active = previous;
 }
 
 void sub_000C1860(void)

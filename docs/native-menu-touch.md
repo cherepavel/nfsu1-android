@@ -54,6 +54,7 @@ Host queue/mapping regression test:
 
 ```sh
 cc -std=c11 -Wall -Wextra -Werror -Isrc tests/menu_touch.c src/menu_touch.c src/input_mode.c \
+  xboxrecomp/src/kernel/video_layout.c \
   -pthread -lm -o /tmp/nfsu-menu-touch-test
 /tmp/nfsu-menu-touch-test
 ```
@@ -115,8 +116,10 @@ checks and identity checks are not an allocator-level lifetime guarantee.
 cc -O1 -D__ANDROID__ -ffunction-sections -fdata-sections -Isrc \
   -Iandroid/app/build/generated/recomp tests/menu_touch_focus.c \
   src/recomp_manual.c src/feng_touch.c src/menu_touch.c src/input_mode.c \
+  src/widescreen.c src/widescreen_guest.c \
   src/touch_gesture.c src/touch_orbit.c src/feng_touch_carousel.c \
-  src/feng_touch_camera.c src/feng_touch_magazines.c -Wl,--gc-sections -pthread -lm \
+  src/feng_touch_camera.c src/feng_touch_magazines.c \
+  xboxrecomp/src/kernel/video_layout.c -Wl,--gc-sections -pthread -lm \
   -o /tmp/nfsu-menu-focus-test
 /tmp/nfsu-menu-focus-test
 ```
