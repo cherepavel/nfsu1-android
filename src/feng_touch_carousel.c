@@ -124,18 +124,47 @@ static int touch_carousel_binding(uint32_t screen, TouchCarousel *binding)
     return 0;
 }
 
+/* Resolve the visible strip independently of the selected thumbnail. Trade
+ * cars use master_thumb/thumb rather than the garage logos; the selected
+ * object can have no cached quad while the caption/arrows are still drawn.
+ * All browsers use the same rendered anchors for capture AND camera blocking. */
+static uint32_t touch_carousel_geometry(const TouchCarousel *binding, TouchBounds *area)
+{
+    uint32_t node = binding->selected_node;
+    if (!binding->selected_object && !touch_guest_range(node, 0x10)) return 0;
+    uint32_t candidates[7] = {
+        binding->selected_object ? binding->selected_object :
+            touch_guest_range(node, 0x10) ? MEM32(node + 0xC) : 0,
+        binding->label_hashes[0] ? touch_rendered_object(binding->label_hashes[0]) : 0,
+        binding->label_hashes[1] ? touch_rendered_object(binding->label_hashes[1]) : 0,
+        touch_rendered_object(0x543398D3u),
+        touch_rendered_object(0xDB157AC6u),
+        touch_rendered_object(touch_name_hash("select_arrow_left_button")),
+        touch_rendered_object(touch_name_hash("select_arrow_right_button"))
+    };
+    uint32_t anchor = 0;
+    for (unsigned i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+        TouchBounds bounds;
+        if (!candidates[i] || !touch_object_bounds(candidates[i], &bounds, 0) ||
+            bounds.bottom - bounds.top > 160) continue;
+        if (!anchor) { *area = bounds; anchor = candidates[i]; }
+        else touch_bounds_include(area, &bounds);
+    }
+    return anchor;
+}
+
+static int touch_carousel_in_strip(const TouchBounds *bounds, float x, float y)
+{
+    return x >= 0 && x < 640 && y >= 0 && y < bounds->bottom + 16;
+}
+
 /* Shared boundary for carousel capture and camera movement. */
 int touch_carousel_strip(uint32_t screen, float x, float y)
 {
     TouchCarousel binding;
-    if (!screen || !touch_carousel_binding(screen, &binding) || !binding.allow_swipe) return 0;
-    uint32_t node = binding.selected_node;
-    uint32_t object = binding.selected_object ? binding.selected_object :
-        node ? MEM32(node + 0xC) : 0;
     TouchBounds bounds;
-    if (!object || !touch_object_bounds(object, &bounds, 0) ||
-        bounds.bottom - bounds.top > 160) return 0;
-    return x >= 0 && x < 640 && y >= 0 && y < bounds.bottom + 16;
+    return screen && touch_carousel_binding(screen, &binding) && binding.allow_swipe &&
+        touch_carousel_geometry(&binding, &bounds) && touch_carousel_in_strip(&bounds, x, y);
 }
 
 int touch_carousel_capture(uint32_t screen, TouchTarget *target, float x, float y)
@@ -198,14 +227,14 @@ int touch_carousel_capture(uint32_t screen, TouchTarget *target, float x, float 
             if (binding.label_hashes[i]) object = touch_rendered_named_hit(binding.label_hashes[i]);
         message = binding.activate_message;
     }
-    if (!object && binding.allow_swipe && (binding.selected_node || binding.selected_object)) {
+    if (!object && binding.allow_swipe) {
         /* The selected icon is only a small part of the visible carousel strip.
-         * Capture gaps and side logos from the canvas top through its rendered bottom.
+         * Capture gaps through the rendered item/caption/arrow bottom.
          * A gap owns swipes only: a stationary tap must not open Customize. */
-        uint32_t selected = binding.selected_object ? binding.selected_object :
-            MEM32(binding.selected_node + 0xC);
-        if (touch_carousel_strip(screen, x, y)) {
-            object = selected;
+        TouchBounds bounds;
+        uint32_t anchor = touch_carousel_geometry(&binding, &bounds);
+        if (anchor && touch_carousel_in_strip(&bounds, x, y)) {
+            object = anchor;
             message = binding.activate_message;
             target->swipe_only = 1;
         }

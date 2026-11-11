@@ -349,12 +349,70 @@ arrow/item/label hit areas, release-only taps and horizontal swipes. Empty-space
 drags use the shared direct camera orbit; captured controls cannot rotate it.
 No additional hooks in recomp_manual.c or fixed screen rectangles are needed.
 
+Choose Trade Car (UndergroundTradeCarScreen, 1FBDB0, handler B75E0)
+uses the same adapter at +48/+54. Its constructor B73F0 builds
+`master_thumb`/`thumb` objects; the car name is D6D32016. The shared strip
+now includes the rendered selected item, captions and browser arrows, rather
+than depending solely on the selected item's cached quad. Visible arrows or
+a caption keep swipes available when that quad is absent; arrows below a
+smaller thumbnail also extend the strip. Capture and camera blocking resolve
+the same geometry on every sample. Gap taps remain inert, swipes dispatch
+one native Left/Right on release, and the car area below the strip retains
+the garage camera behavior. Selection and the trade Next footer retain their
+existing native actions.
+
+The regression covers missing and smaller selected quads, lower arrows,
+zero selectable rows, gap taps, both swipe directions, camera crossing and
+screen transitions for Quick Race, both garage entry paths and Choose Trade
+Car. The previous adapter fails the missing-quad swipe assertion; the updated
+adapter passes it. Host queue/mapping and shared gesture tests also pass.
+
+On-device inspection on 2026-11-08 found why trade-car buttons and swipes
+were discarded while camera orbit continued to work. The active controller
+was UndergroundTradeCarScreen (1FBDB0), but `screen +0C` held 1FACB8, the
+string `MU_UG_TradeCareerCar.fng`, rather than its live FEng package
+(829523A0 in that session). The trade input filter compared the package
+pointer against this string address and rejected every package dispatch.
+Camera orbit runs independently after package dispatch, so it still worked.
+
+Resolve the live package from the screen registration (`reg +10` is the
+controller, `reg +14` is its package), retaining foreground ownership of
+the shared backdrop arrows. The same correction applies to trade confirmation
+and the subsequent PerformanceStats screen. The regression now stores the
+actual FNG-name string at `screen +0C` and covers backdrop ownership, arrow
+taps, inert gap taps, both release-only swipes, caption/Next activation and
+confirmation. The previous filter fails the arrow assertion with this fixture;
+the corrected filter passes the full host regression.
+
+For sensor input, the trade PerformanceStats pages reuse their native
+off-canvas NEXT_TAG and BACK_TAG text objects as Choose Car and Cancel.
+The pair is centred beneath the last rendered NOS row; hit bounds come from
+the actual text quads. Choose Car sends native Select through EF300, advancing
+from current-car stats to candidate stats and then the trade confirmation.
+Cancel sends native Back. Dragging between the buttons cancels activation.
+Their text, scale, position and custom-text flag are restored when sensor
+input is disabled or the active screen changes. Host coverage includes layout,
+actions and controller-mode restoration.
+Text is copied with the native DC410/E9300 owned-string setter. The guest
+input buffer must never be installed directly at object +60: native package
+destruction frees that field. Disabling custom-text mode restores localization
+through the original language key without resurrecting its freed old buffer.
+
+Device validation, 2026-11-09: the updated APK was installed on Xiaomi
+24076RP19G. Choose Car and Cancel were visible below the performance table.
+After replacing the initial direct +60 pointer substitution with DC410, the
+user confirmed that the Choose Car transition works without crashing. The
+final pair is centred using the actual rendered caption widths. This confirms
+the reported transition on that device; the other browser entry paths retain
+host regression coverage rather than new physical-device acceptance.
+
 Synthetic geometry/gesture regressions pass for both arrows, selected-item
 activation, both swipe directions, release-only dispatch, proportional camera
 rotation and stationary-finger stability on this screen. Queue/mapping tests
-also pass. APK assembly was blocked by the read-only Gradle cache; the requested
-permission to run the build outside the sandbox was declined. A new APK and
-physical-device validation remain pending.
+also pass. Root `./gradlew assembleDebug` passed with the updated shared
+adapter and produced `android/app/build/outputs/apk/debug/app-debug.apk`.
+Choose Trade Car device validation is recorded above; broader device coverage
+for the shared car browsers remains pending.
 
 Car Customization carousel gaps now capture swipe-only gestures across the
 640-wide FEng canvas, from the canvas top to the selected logo's rendered bottom plus

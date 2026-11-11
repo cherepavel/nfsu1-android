@@ -87,6 +87,8 @@ extern void sub_000F8B80_gen(void);
  * the owner's identity so an object freed/replaced by FEng is not restored. */
 static struct { uint32_t address, original, replacement, owner, hash; } s_touch_edits[8192];
 static unsigned s_touch_edit_count;
+static uint32_t s_trade_footer_screen, s_trade_footer_objects[2], s_trade_footer_text;
+static uint32_t s_trade_footer_custom[2];
 static void touch_edit(uint32_t address, uint32_t value, uint32_t owner)
 {
     for (unsigned i = 0; i < s_touch_edit_count; i++) {
@@ -108,6 +110,14 @@ static void touch_edit(uint32_t address, uint32_t value, uint32_t owner)
 }
 static void touch_restore(void)
 {
+    for (unsigned i = 0; i < 2; i++) {
+        uint32_t object = s_trade_footer_objects[i];
+        if (touch_guest_range(object, 0x64) && MEM32(object + 0x10) == 0x5B9D88B9u &&
+            MEM32(object + 0x5C) == (i ? 0xA1D233EBu : 0x1A705339u))
+            MEM32(object + 0x1C) = (MEM32(object + 0x1C) & ~2u) | s_trade_footer_custom[i] | 0x02400000u;
+    }
+    s_trade_footer_screen = 0;
+    memset(s_trade_footer_objects, 0, sizeof(s_trade_footer_objects));
     while (s_touch_edit_count) {
         unsigned i = --s_touch_edit_count;
         uint32_t owner = s_touch_edits[i].owner;
@@ -187,6 +197,7 @@ int touch_object_bounds(uint32_t object, TouchBounds *out, unsigned depth)
 static int touch_back_label(uint32_t object)
 {
     if (!object || MEM32(object + 0x18) != 2) return 0;
+    if (object == s_trade_footer_objects[1]) return 1;
     uint32_t language = MEM32(object + 0x5C);
     if (language == 0x001335F0u) return 1; /* native/localized Back */
     if (MEM32(NFSU1_GAMEFLOW_STATE) == 6 && feng_touch_race_menu_active() &&
@@ -265,6 +276,92 @@ uint32_t touch_active_screen(void)
         }
     }
     return 0;
+}
+
+/* Screen +0C stores the FNG NAME, not the live package allocation.
+ * The registration record binds a controller to its current FEng package. */
+static uint32_t touch_screen_package(uint32_t screen)
+{
+    uint32_t reg = MEM32(0x002BCB9Cu);
+    for (unsigned n = 0; touch_guest_range(reg, 0x18) && reg != 0x002BCB9Cu && n < 64;
+         n++, reg = MEM32(reg)) {
+        if (MEM32(reg + 0x10) == screen) return MEM32(reg + 0x14);
+    }
+    return 0;
+}
+
+extern uint32_t xbox_ContiguousAlloc(uint32_t size, uint32_t alignment);
+extern void sub_000DC410(void);
+/* PerformanceStats contains native NEXT_TAG/BACK_TAG text objects, parked
+ * off-canvas by the Xbox layout. Reuse their font and cached hit geometry,
+ * placing a centred action pair below the last rendered performance row. */
+static void touch_trade_footer(uint32_t screen)
+{
+    int enabled = touch_guest_range(screen, 4) && MEM32(screen) == 0x00200208u &&
+        MEM32(0x002BE37Cu) && touch_menu_enabled();
+    if (s_trade_footer_screen && (!enabled || screen != s_trade_footer_screen)) touch_restore();
+    if (!enabled) return;
+    uint32_t package = touch_screen_package(screen);
+    if (!touch_guest_range(package, 0x48)) return;
+    uint32_t buttons[2] = {0};
+    uint32_t object = MEM32(package + 0x40), last = MEM32(package + 0x44);
+    for (unsigned i = 0; touch_guest_range(object, 0x68) && i < 4096;
+         i++, object = MEM32(object + 4)) {
+        if (MEM32(object + 0x18) == 2 && MEM32(object + 0x10) == 0x5B9D88B9u) {
+            uint32_t language = MEM32(object + 0x5C);
+            if (language == 0x1A705339u) buttons[0] = object;
+            if (language == 0xA1D233EBu) buttons[1] = object;
+        }
+        if (object == last) break;
+    }
+    if (!buttons[0] || !buttons[1]) return;
+    uint32_t row = touch_rendered_object(0x9B460C1Fu); /* native NOS row */
+    TouchBounds bounds;
+    if (!row || !touch_object_bounds(row, &bounds, 0)) return;
+    if (!s_trade_footer_text) {
+        s_trade_footer_text = xbox_ContiguousAlloc(64, 16);
+        if (!s_trade_footer_text) return;
+        const char *labels[2] = { "Choose Car", "Cancel" };
+        for (unsigned i = 0; i < 2; i++)
+            memcpy((void *)XBOX_PTR(s_trade_footer_text + i * 32), labels[i], strlen(labels[i]) + 1);
+    }
+    float positions[2] = { -80, 80 };
+    TouchBounds first, second;
+    if (s_trade_footer_objects[0] == buttons[0] && s_trade_footer_objects[1] == buttons[1] &&
+        touch_object_bounds(buttons[0], &first, 0) && touch_object_bounds(buttons[1], &second, 0)) {
+        float width = first.right - first.left, other_width = second.right - second.left;
+        positions[0] = -(width + other_width + 40) * .5f;
+        positions[1] = positions[0] + width + 40;
+    }
+    s_trade_footer_screen = screen;
+    for (unsigned i = 0; i < 2; i++) {
+        object = buttons[i];
+        uint32_t layout = MEM32(object + 0x2C);
+        if (!touch_guest_range(layout, 0x44)) continue;
+        if (s_trade_footer_objects[i] != object) {
+            s_trade_footer_objects[i] = object;
+            s_trade_footer_custom[i] = MEM32(object + 0x1C) & 2u;
+            /* DC410 copies through the native owned-string setter. Never
+             * replace +60 with our input buffer: package destruction frees it. */
+            uint32_t saved_eax = eax, saved_ecx = ecx, saved_edx = edx, saved_esp = esp;
+            PUSH32(esp, 0); PUSH32(esp, s_trade_footer_text + i * 32);
+            PUSH32(esp, object); PUSH32(esp, 0);
+            sub_000DC410();
+            eax = saved_eax; ecx = saved_ecx; edx = saved_edx; esp = saved_esp;
+        }
+        float x = positions[i];
+        float y = fminf(bounds.bottom + 48.0f, 440.0f) - 240.0f;
+        uint32_t x_bits, y_bits;
+        memcpy(&x_bits, &x, 4); memcpy(&y_bits, &y, 4);
+        int changed = MEM32(layout + 0x1C) != x_bits || MEM32(layout + 0x20) != y_bits ||
+            MEM32(layout + 0x38) != 0x3F800000u || MEM32(layout + 0x3C) != 0x3F800000u;
+        touch_edit(layout + 0x1C, x_bits, object);
+        touch_edit(layout + 0x20, y_bits, object);
+        touch_edit(layout + 0x38, 0x3F800000u, object);
+        touch_edit(layout + 0x3C, 0x3F800000u, object);
+        MEM32(object + 0x1C) = (MEM32(object + 0x1C) & ~0x04000000u) | 2u |
+            (changed ? 0x02400000u : 0);
+    }
 }
 
 uint32_t touch_rendered_named_hit(uint32_t hash)
@@ -923,7 +1020,7 @@ static void touch_dispatch_snapshot(void)
     uint32_t type = s_touch_snapshot->screen_type;
     if (active && (type == 0x001FBDB0u || type == 0x001FBD4Cu ||
         (type == 0x00200208u && MEM32(0x002BE37Cu))) &&
-        package != MEM32(s_touch_snapshot->screen + 0xC)) {
+        package != touch_screen_package(s_touch_snapshot->screen)) {
         esp += 8;
         return; /* The foreground trade screen receives input for shared arrows. */
     }
@@ -1331,6 +1428,7 @@ void feng_touch_frame_begin(void)
     if (screen != s_qr_screen || focus != s_qr_focus || MEM32(screen) != 0x001FB64Cu)
         s_qr_arrow_count = 0;
     s_qr_screen = screen; s_qr_focus = focus;
+    touch_trade_footer(screen);
     s_touch_bounds_count = 0;
 }
 
@@ -1378,9 +1476,9 @@ int feng_touch_draw_cache(uint32_t cache)
             memcpy(&x, (void *)XBOX_PTR(entry + 0x20 + i * 16), 4);
             memcpy(&y, (void *)XBOX_PTR(entry + 0x24 + i * 16), 4);
             touch_bounds_add(s_touch_draw_object, x, y);
-            /* Cached quad RGBA array starts at quad+80 (entry+90), as
-             * consumed by 192C0/192A0. Keep Back fully opaque and white. */
-            if (touch_back_label(s_touch_draw_object))
+            /* Keep the sensor actions fully opaque above modal dimming. */
+            if (touch_back_label(s_touch_draw_object) ||
+                s_touch_draw_object == s_trade_footer_objects[0])
                 touch_edit(entry + 0x90 + i * 4, 0xFFFFFFFFu, s_touch_draw_object);
         }
         entry = MEM32(entry);
@@ -1398,7 +1496,8 @@ int feng_touch_draw_cache(uint32_t cache)
             }
         }
     }
-    if (touch_menu_enabled() && touch_back_label(s_touch_draw_object)) {
+    if (touch_menu_enabled() && (touch_back_label(s_touch_draw_object) ||
+            s_touch_draw_object == s_trade_footer_objects[0])) {
         if (s_back_cache_count < 16) s_back_caches[s_back_cache_count++] = cache;
         return 1; /* draw above modal dimming panels at the end of FEng */
     }

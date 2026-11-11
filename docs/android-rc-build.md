@@ -3,7 +3,7 @@
 Build from the repository root with the established APK/signing task:
 
 ```sh
-./gradlew assembleDebug -Pnfsu.registerBlock=true -Pnfsu.executorTlsArg=true
+./build_debug.sh
 ```
 
 After a successful build, the distributable RC artifact is
