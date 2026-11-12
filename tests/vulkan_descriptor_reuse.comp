@@ -1,0 +1,18 @@
+#version 450
+layout(local_size_x = 1) in;
+layout(set = 0, binding = 0) uniform A { uvec4 a; };
+layout(set = 0, binding = 1) uniform B { uvec4 b; };
+layout(set = 0, binding = 6) uniform C { uvec4 c; };
+layout(set = 0, binding = 2) uniform sampler2D t0;
+layout(set = 0, binding = 3) uniform sampler2D t1;
+layout(set = 0, binding = 4) uniform sampler2D t2;
+layout(set = 0, binding = 5) uniform sampler2D t3;
+layout(set = 1, binding = 0, std430) buffer Output { uvec4 values[]; };
+layout(push_constant) uniform Push { uint index; };
+void main() {
+    uvec4 texels = uvec4(packUnorm4x8(texelFetch(t0, ivec2(0), 0)),
+                        packUnorm4x8(texelFetch(t1, ivec2(0), 0)),
+                        packUnorm4x8(texelFetch(t2, ivec2(0), 0)),
+                        packUnorm4x8(texelFetch(t3, ivec2(0), 0)));
+    values[index] = ((a + b.yzwx) ^ c.zwxy) + texels;
+}
