@@ -266,7 +266,7 @@ static Frame *s_f;             /* the frame being recorded */
 static uint32_t s_fi;
 static VkCommandBuffer s_cb;   /* s_f->cbs[s_f->ncb] while recording */
 static uint32_t s_kick_draws, s_st_kicks;
-static uint32_t s_ring_gen; /* invalidates cached constants when the ring resets */
+static uint32_t s_ring_gen; /* invalidates cached uploads when the ring resets */
 static uint32_t s_cb_gen;      /* bumped at every vkBeginCommandBuffer */
 static int s_dyn_valid;
 
@@ -3432,6 +3432,25 @@ static int prim_indices(const Nv2aRawBatch *b, const uint32_t **idx, uint32_t *n
 
 /* ── Vertices ─────────────────────────────────────────────────────── */
 
+#ifdef __ANDROID__
+/* Startup-only: 0 original, 1 reuse, 2 measure reuse opportunities while
+ * retaining every original upload/bind. Reuse is enabled by default. */
+static int vertex_cache_mode(void)
+{
+    static int mode = -1;
+    if (mode < 0) {
+        char property[PROP_VALUE_MAX] = {0};
+        const char *value = getenv("RECOMP_VK_VERTEX_CACHE");
+        if (!value && __system_property_get("debug.nfsu.vertex_cache", property) > 0)
+            value = property;
+        mode = !value || !*value || !strcmp(value, "1") ? 1 : !strcmp(value, "2") ? 2 : 0;
+        NFS_LOG_INFO("graphics", "[VKVTX] mode=%d (0 original, 1 reuse, 2 measure; startup only)\n", mode);
+    }
+    return mode;
+}
+#include "nv2a_vk_vertex_cache.h"
+#endif
+
 typedef struct { const uint8_t *lo, *hi; VkDeviceSize at; } VRun;
 
 static uint32_t elem_bytes(uint32_t type, uint32_t size)
@@ -3575,6 +3594,10 @@ static int upload_vertices(const Nv2aRawBatch *b)
     VkBuffer bufs[NV2A_RAW_ATTRS];
     VkDeviceSize offs[NV2A_RAW_ATTRS];
     void *map;
+#ifdef __ANDROID__
+    VkVertexUploadLookup lookup;
+    int cache_mode, cache_eligible;
+#endif
 
     if (!nv)
         return 0;
@@ -3594,6 +3617,14 @@ static int upload_vertices(const Nv2aRawBatch *b)
         run[i].at = bytes;
         bytes += ((VkDeviceSize)(run[i].hi - run[i].lo) + 15) & ~(VkDeviceSize)15;
     }
+#ifdef __ANDROID__
+    cache_mode = vertex_cache_mode();
+    cache_eligible = vertex_cache_lookup(b, direct, conv, bytes, cache_mode, &lookup);
+    if (cache_eligible && lookup.hit && cache_mode == 1) {
+        vertex_cache_reuse(&lookup);
+        return 1;
+    }
+#endif
     for (a = 0; a < NV2A_RAW_ATTRS; a++)
         if (conv & (1u << a))
             slot[np++] = a;
@@ -3676,9 +3707,14 @@ static int upload_vertices(const Nv2aRawBatch *b)
     }
 #endif
 #ifdef __ANDROID__
-    /* Mali accepts all bindings in one call. Offsets still change every draw,
-     * so this is batching two writes, not caching vertex buffer contents. */
+    /* Mali accepts all bindings in one call. This ordinary upload has new
+     * offsets; cache hits above may retain the preceding vertex bindings. */
     vkCmdBindVertexBuffers(s_cb, 0, NV2A_RAW_ATTRS, bufs, offs);
+    if (cache_mode) {
+        VkDeviceSize copied = (VkDeviceSize)nv * np * 16 + NV2A_RAW_ATTRS * 16;
+        for (i = 0; i < nrun; i++) copied += (VkDeviceSize)(run[i].hi - run[i].lo);
+        vertex_cache_record(b, cache_mode, cache_eligible, &lookup, offs, copied);
+    }
 #else
     /* Eight at a time: Mesa's common entry point copies the arrays through
      * STACK_ARRAY, which mallocs above 8 elements (~3.6% of the executor
@@ -4690,6 +4726,17 @@ static void vk_flip_impl(void)
     s_frame++;
     if (s_frame % 300 == 0) {
         pool_report();
+#ifdef __ANDROID__
+        if (vertex_cache_mode()) {
+            NFS_LOG_INFO("graphics", "[VKVTX] frame=%u mode=%d draws=%llu eligible=%llu hits=%llu copied_bytes=%llu reusable_bytes=%llu reused_bytes=%llu binds=%llu skipped_binds=%llu (since report)\n",
+                s_frame, vertex_cache_mode(),
+                (unsigned long long)s_vertex_stats.draws, (unsigned long long)s_vertex_stats.eligible,
+                (unsigned long long)s_vertex_stats.hits, (unsigned long long)s_vertex_stats.copied_bytes,
+                (unsigned long long)s_vertex_stats.reusable_bytes, (unsigned long long)s_vertex_stats.reused_bytes,
+                (unsigned long long)s_vertex_stats.binds, (unsigned long long)s_vertex_stats.skipped_binds);
+            memset(&s_vertex_stats, 0, sizeof s_vertex_stats);
+        }
+#endif
         if (native_ui_enabled())
             NFS_LOG_INFO("graphics", "[VKUI] frame=%u switches=%llu restores=%llu preserve_copies=%llu ui_draws=%llu markers=%llu/%llu\n",
                 s_frame, (unsigned long long)s_native_ui_switches,
