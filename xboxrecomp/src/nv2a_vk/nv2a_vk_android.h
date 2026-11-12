@@ -1,6 +1,7 @@
 /* Vulkan 1.1 path for Android drivers without dynamic rendering, push
  * descriptors or extended dynamic state. Included after Frame/s_cb. */
 #include "nv2a_vk_framebuffer_cache.h"
+#include "nv2a_vk_descriptor_reuse.h"
 static struct { VkFormat format; int depth, present, clears; VkRenderPass pass; } s_android_passes[32];
 
 /* Live A/B control; one property read per 300 flips, never per draw. */
@@ -79,6 +80,7 @@ static void android_frame_reset(Frame *frame)
     frame->nframebuffers = 0;
     if (frame->descriptors) vkResetDescriptorPool(s_dev, frame->descriptors, 0);
     android_descriptor_cache_reset(frame);
+    android_descriptor_reuse_reset(frame);
 }
 
 static void VKAPI_PTR android_begin_rendering(VkCommandBuffer command, const VkRenderingInfo *info)
@@ -137,15 +139,21 @@ static void android_descriptor_pool_ready(void)
 static void VKAPI_PTR android_push_descriptors(VkCommandBuffer command, VkPipelineBindPoint point,
     VkPipelineLayout layout, uint32_t index, uint32_t count, const VkWriteDescriptorSet *writes)
 {
-    android_descriptor_pool_ready();
     VkDescriptorSetLayout dsl = count == 7 ? s_dsl : s_pp_dsl;
-    VkDescriptorSetAllocateInfo allocate = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    allocate.descriptorPool = s_f->descriptors;
-    allocate.descriptorSetCount = 1;
-    allocate.pSetLayouts = &dsl;
     VkDescriptorSet set;
-    if (vkAllocateDescriptorSets(s_dev, &allocate, &set) != VK_SUCCESS) {
-        NFS_LOG_FATAL("graphics", "  [VK] " "descriptor pool exhausted\n"); abort();
+    VkResult result;
+    if (s_android_descriptor_reuse) {
+        result = android_descriptor_reuse_get(s_f, dsl, count != 7, &set);
+    } else {
+        android_descriptor_pool_ready();
+        VkDescriptorSetAllocateInfo allocate = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        allocate.descriptorPool = s_f->descriptors;
+        allocate.descriptorSetCount = 1;
+        allocate.pSetLayouts = &dsl;
+        result = vkAllocateDescriptorSets(s_dev, &allocate, &set);
+    }
+    if (result != VK_SUCCESS) {
+        NFS_LOG_FATAL("graphics", "  [VK] descriptor allocation failed: %d\n", result); abort();
     }
     VkWriteDescriptorSet updated[7];
     if (count > 7) abort();

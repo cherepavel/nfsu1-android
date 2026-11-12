@@ -256,6 +256,7 @@ typedef struct {
 #ifdef __ANDROID__
     VkDescriptorPool descriptors;
     struct AndroidDescriptorCache *descriptor_cache;
+    struct AndroidDescriptorReuse *descriptor_reuse;
     VkFramebuffer *framebuffers;
     uint32_t nframebuffers, framebuffer_cap;
 #endif
@@ -273,10 +274,20 @@ static int s_dyn_valid;
 #ifdef __ANDROID__
 static VkDescriptorSetLayout s_dsl, s_pp_dsl;
 static int s_android_dynamic_descriptors;
+static int s_android_descriptor_reuse;
 static void android_descriptor_cache_reset(Frame *frame);
 #include "nv2a_vk_android.h"
 #include "nv2a_vk_push_descriptors.h"
 #include "nv2a_vk_dynamic_descriptors.h"
+
+static int android_descriptor_reuse_requested(void)
+{
+    char property[PROP_VALUE_MAX] = {0};
+    const char *value = getenv("RECOMP_VK_DESCRIPTOR_REUSE");
+    if (!value && __system_property_get("debug.nfsu.descriptor_reuse", property) > 0)
+        value = property;
+    return !value || !*value || !strcmp(value, "1");
+}
 #endif
 static void garbage_add_pipe(VkPipeline pipe);
 static void garbage_add(VkImage img, VkImageView view, VkDeviceMemory mem)
@@ -3086,6 +3097,10 @@ static int ready(void)
     }
     NFS_LOG_INFO("graphics", "[VKDESC] requested=%d supported=%d max_push=%u native=%d\n",
         push_requested, push_supported, push_limit, s_android_native_push);
+    int reuse_requested = android_descriptor_reuse_requested();
+    s_android_descriptor_reuse = reuse_requested && !s_android_dynamic_descriptors && !s_android_native_push;
+    NFS_LOG_INFO("graphics", "[VKSET] requested=%d active=%d (startup only)\n",
+        reuse_requested, s_android_descriptor_reuse);
     p_begin_rendering = android_begin_rendering;
     p_end_rendering = android_end_rendering;
 #else

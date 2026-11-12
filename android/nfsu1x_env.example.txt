@@ -41,6 +41,9 @@ RECOMP_QUIET=1
 # RECOMP_VK_INDEX_FUSE=0
 # Index upload counters every 300 flips; default off. Restart.
 # RECOMP_VK_INDEX_STATS=1
+# Ordinary descriptor allocation reuse: default 1; 0 per-draw allocation. Restart.
+# Explicit native-push/dynamic-descriptor experiments take precedence.
+# RECOMP_VK_DESCRIPTOR_REUSE=0
 # RECOMP_FPS_LOG=1
 # RECOMP_VK_TRACE=1
 # XBOX_LOG_LEVEL=3
