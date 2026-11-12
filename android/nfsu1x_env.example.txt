@@ -37,6 +37,10 @@ RECOMP_QUIET=1
 # RECOMP_ADAPTIVE_WIDESCREEN=0
 # Direct vertex upload reuse: default 1; 0 original, 2 measure only. Restart.
 # RECOMP_VK_VERTEX_CACHE=0
+# Fused index rebase/packing: default 1; 0 restores the previous path. Restart.
+# RECOMP_VK_INDEX_FUSE=0
+# Index upload counters every 300 flips; default off. Restart.
+# RECOMP_VK_INDEX_STATS=1
 # RECOMP_FPS_LOG=1
 # RECOMP_VK_TRACE=1
 # XBOX_LOG_LEVEL=3

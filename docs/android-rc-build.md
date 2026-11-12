@@ -23,6 +23,7 @@ than requiring users to reproduce the investigation's device properties.
 | Guest runtime executor | On | debug.nfsu.executor=0 restores the previous runtime path |
 | Dynamic-state command cache | On | debug.nfsu.state_cache=0 |
 | Direct vertex upload cache | On on Android | debug.nfsu.vertex_cache=0; 2 measures reuse without skipping uploads; next process |
+| Fused index upload | On on Android | debug.nfsu.index_fuse=0 restores the previous path; next process |
 | Early reflection assembly | On on Android | debug.nfsu.cube_early=0; environment override still takes precedence |
 | Scoped render-pass consumer barrier | On on Android | debug.nfsu.pass_barrier=0, live at the next poll |
 | Early-submit draw threshold | 300, unchanged | debug.nfsu.vk_kick=N, next process |
