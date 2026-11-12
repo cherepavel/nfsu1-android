@@ -422,13 +422,25 @@ static void import_submissions(XgfExecutor *e)
     }
 }
 
+/* Keep the clock's address-taken timespec out of the cached safe-point path.
+ * In Android ARM64 builds it otherwise forces a stack frame and stack-canary
+ * traffic even when there are no equal-priority peers and no clock is read.
+ * Return the status directly so the query can tail-call this uncommon path. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline))
+#endif
+static XgfPreemptStatus fiber_slice_preempt(XgfFiber *self)
+{
+    return monotonic_ms() > self->slice_start ? XGF_PREEMPT_YIELD : XGF_PREEMPT_STAY;
+}
+
 /* Keep list/mutex work out of the cached safe-point path. The generation
  * snapshot is still taken before refresh, exactly as before: a concurrent
  * publication forces another refresh at the next safe point. */
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((noinline, cold))
 #endif
-static void fiber_refresh_preempt(XgfFiber *self, uint64_t generation)
+static XgfPreemptStatus fiber_refresh_preempt(XgfFiber *self, uint64_t generation)
 {
     XgfExecutor *e = self->executor;
     pthread_mutex_lock(&e->wake_lock);
@@ -447,25 +459,30 @@ static void fiber_refresh_preempt(XgfFiber *self, uint64_t generation)
     self->preempt_equal = equal;
     self->preempt_generation = generation;
     self->preempt_valid = 1;
+    if (self->preempt_higher) return XGF_PREEMPT_YIELD;
+    if (self->preempt_equal) return fiber_slice_preempt(self);
+    return XGF_PREEMPT_STAY;
 }
 
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((always_inline))
 #endif
-static inline int fiber_should_preempt(XgfFiber *self)
+static inline XgfPreemptStatus fiber_preempt_decision(XgfFiber *self)
 {
-    if (__atomic_load_n(&self->suspended, __ATOMIC_ACQUIRE)) return 1;
+    if (__atomic_load_n(&self->suspended, __ATOMIC_ACQUIRE)) return XGF_PREEMPT_YIELD;
     uint64_t generation = __atomic_load_n(&self->executor->ready_generation, __ATOMIC_ACQUIRE);
     if (!self->preempt_valid || self->preempt_generation != generation)
-        fiber_refresh_preempt(self, generation);
-    return self->preempt_higher ||
-        (self->preempt_equal && monotonic_ms() > self->slice_start);
+        return fiber_refresh_preempt(self, generation);
+    if (self->preempt_higher) return XGF_PREEMPT_YIELD;
+    if (self->preempt_equal) return fiber_slice_preempt(self);
+    return XGF_PREEMPT_STAY;
 }
 
 int xgf_should_preempt(void)
 {
     XgfFiber *self = xgf_current();
-    return self && !running->on_native_callback && fiber_should_preempt(self);
+    return self && !running->on_native_callback &&
+        fiber_preempt_decision(self) == XGF_PREEMPT_YIELD;
 }
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -481,7 +498,7 @@ static inline XgfPreemptStatus fiber_preempt_status(XgfExecutor *e)
     const RecompKernelState *k = &self->context.kernel;
     if (e->on_native_callback || k->gil_depth <= 0 || k->gil_nopreempt || k->dispatch_held)
         return XGF_PREEMPT_STAY;
-    return fiber_should_preempt(self) ? XGF_PREEMPT_YIELD : XGF_PREEMPT_STAY;
+    return fiber_preempt_decision(self);
 }
 
 XgfPreemptStatus xgf_preempt_status(void)
