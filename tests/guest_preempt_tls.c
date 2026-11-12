@@ -2,13 +2,29 @@
  * native stacks. Full stack/lifecycle coverage remains in guest_executor.c. */
 #include <pthread.h>
 #include <stdlib.h>
+#include <assert.h>
+#include <stdint.h>
+#include <time.h>
+/* Exact quantum-boundary checks without sleeps or host clock jitter. */
+static uint64_t clock_ms = 5000;
+static unsigned clock_reads;
+static int preempt_clock_gettime(clockid_t clock, struct timespec *time)
+{
+    assert(clock == CLOCK_MONOTONIC);
+    clock_reads++;
+    time->tv_sec = (time_t)(clock_ms / 1000);
+    time->tv_nsec = (long)(clock_ms % 1000) * 1000000;
+    return 0;
+}
 #ifdef __APPLE__
 /* Executor creation is not exercised here. Darwin lacks this Linux API. */
 static int unused_condattr_clock(pthread_condattr_t *attr, clockid_t clock)
 { (void)attr; (void)clock; abort(); }
 #define pthread_condattr_setclock unused_condattr_clock
 #endif
+#define clock_gettime preempt_clock_gettime
 #include "../xboxrecomp/src/kernel/guest_fiber.c"
+#undef clock_gettime
 #include "recomp_context_registers.h"
 #include <assert.h>
 #include <stdio.h>
@@ -48,10 +64,11 @@ int main(void)
     e.active = &self;
     running = &e;
     self.context.kernel.gil_depth = 1;
-    check(XGF_PREEMPT_STAY);
+    clock_reads = 0; check(XGF_PREEMPT_STAY); assert(!clock_reads);
     self.suspended = 1; check(XGF_PREEMPT_YIELD); self.suspended = 0;
     e.list = &peer; self.preempt_valid = 0;
-    check(XGF_PREEMPT_YIELD);
+    clock_reads = 0; check(XGF_PREEMPT_YIELD); assert(!clock_reads);
+    assert(xgf_should_preempt());
     int *guards[] = {&e.on_native_callback, &self.context.kernel.gil_nopreempt,
                     &self.context.kernel.dispatch_held};
     for (unsigned i = 0; i < sizeof(guards) / sizeof(guards[0]); i++) {
@@ -60,8 +77,15 @@ int main(void)
     self.context.kernel.gil_depth = 0; check(XGF_PREEMPT_STAY);
     self.context.kernel.gil_depth = 1;
     assert(xgf_set_priority(&peer, 0));
-    self.slice_start = monotonic_ms() + 1000000; check(XGF_PREEMPT_STAY);
-    self.slice_start = 0; check(XGF_PREEMPT_YIELD);
+    self.slice_start = clock_ms + 1;
+    clock_reads = 0; check(XGF_PREEMPT_STAY); assert(clock_reads == 2);
+    assert(!xgf_should_preempt());
+    self.slice_start = clock_ms;
+    clock_reads = 0; check(XGF_PREEMPT_STAY); assert(clock_reads == 2);
+    assert(!xgf_should_preempt());
+    clock_ms++;
+    clock_reads = 0; check(XGF_PREEMPT_YIELD); assert(clock_reads == 2);
+    assert(xgf_should_preempt());
     assert(xgf_set_priority(&peer, -1)); check(XGF_PREEMPT_STAY);
     assert(xgf_set_priority(&peer, 1));
     peer.state = XGF_WAITING; self.preempt_valid = 0; check(XGF_PREEMPT_STAY);
@@ -83,5 +107,5 @@ int main(void)
     running = NULL; check(XGF_PREEMPT_NATIVE);
     pthread_cond_destroy(&e.wake);
     pthread_mutex_destroy(&e.wake_lock);
-    puts("PASS: executor-argument parity, cached priorities/quantum/wake, guards, native TLS isolation and context ownership");
+    puts("PASS: query parity, cached priorities/wake, exact quantum boundary/clock reads, guards, native TLS isolation and context ownership");
 }
