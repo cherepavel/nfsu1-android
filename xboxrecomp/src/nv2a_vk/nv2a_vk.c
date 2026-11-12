@@ -958,6 +958,9 @@ static VkSurf *target(const Nv2aSurface *sf, uint32_t zeta_va, VkDepthBuf **dout
 
 /* ── Textures ─────────────────────────────────────────────────────── */
 
+#ifdef __ANDROID__
+#include "nv2a_vk_texture_hash.h"
+#endif
 typedef struct {
     uint32_t va, color, w, h, pitch, hash, bytes;
     uint32_t face;              /* cube map: bytes per face; 0 = 2D */
@@ -965,6 +968,9 @@ typedef struct {
     VkImage image; VkImageView view; VkDeviceMemory mem;
     VkFormat fmt;
     uint32_t used, checked;
+#ifdef __ANDROID__
+    VkTextureHashSnapshot *snapshot;
+#endif
 } VkTex;
 
 /* RECOMP_VK_MIPS=0: level 0 only (the old look). RECOMP_VK_ANISO=<n>:
@@ -986,6 +992,38 @@ static VkDeviceMemory s_dummy_mem;
 static VkImage  s_dummy_cube_img;
 static VkImageView s_dummy_cube_view;
 static VkDeviceMemory s_dummy_cube_mem;
+
+#ifdef __ANDROID__
+static int s_texture_snapshot_mode = -1;
+static uint32_t s_texture_snapshot_live;
+static struct { uint64_t checks, hits, captures, allocations, oom, skipped; } s_texture_snapshot_stats;
+static VkTextureHashSnapshot s_texture_snapshot_pending;
+
+static int texture_snapshot_enabled(void)
+{
+    if (s_texture_snapshot_mode < 0) {
+        char property[PROP_VALUE_MAX] = {0};
+        const char *value = getenv("RECOMP_VK_TEXTURE_SAMPLES");
+        if (!value && __system_property_get("debug.nfsu.tex_samples", property) > 0)
+            value = property;
+        s_texture_snapshot_mode = !value || !*value || !strcmp(value, "1");
+        NFS_LOG_INFO("graphics", "[VKTEXS] enabled=%d bytes_per_entry=%zu (startup only)\n",
+            s_texture_snapshot_mode, sizeof(VkTextureHashSnapshot));
+    }
+    return s_texture_snapshot_mode;
+}
+
+static void texture_snapshot_store(VkTex *t)
+{
+    if (!t->snapshot) {
+        t->snapshot = malloc(sizeof *t->snapshot);
+        if (!t->snapshot) { s_texture_snapshot_stats.oom++; return; }
+        s_texture_snapshot_live++;
+        s_texture_snapshot_stats.allocations++;
+    }
+    memcpy(t->snapshot, &s_texture_snapshot_pending, sizeof *t->snapshot);
+}
+#endif
 
 uint64_t nv2a_gl_texture_bytes(void) { return s_tex_bytes; }
 uint32_t nv2a_gl_frame_count(void) { return s_frame; }
@@ -1106,6 +1144,12 @@ static int decode_indexed(uint32_t va, uint32_t w, uint32_t h, uint32_t *out)
 
 static void tex_free(VkTex *t)
 {
+#ifdef __ANDROID__
+    if (t->snapshot) {
+        free(t->snapshot);
+        s_texture_snapshot_live--;
+    }
+#endif
     garbage_add(t->image, t->view, t->mem);
     s_tex_bytes -= t->bytes;
     tex_index_del(t);
@@ -1394,11 +1438,47 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h, 
         return t->view;
     }
     uint64_t perf_hash = nfsu_perf_begin();
-    hash = bytes_hash(va, face ? face * 6 : tex_bytes(color, w, h, pitch));
-    if (color == 0x0B)
-        hash ^= bytes_hash(s_palette_va, 1024) * 31u;
+#ifdef __ANDROID__
+    uint32_t bytes = face ? face * 6 : tex_bytes(color, w, h, pitch);
+    int snapshot_on = texture_snapshot_enabled();
+    if (snapshot_on && (bytes < NV2A_VK_SNAPSHOT_MIN_BYTES || bytes > NV2A_VK_SNAPSHOT_MAX_BYTES)) {
+        s_texture_snapshot_stats.skipped++;
+        snapshot_on = 0;
+    }
+    if (snapshot_on) {
+        const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
+        int paletted = color == 0x0B;
+        VkTextureHashSnapshot *previous = t ? t->snapshot : NULL;
+        if (previous) {
+            s_texture_snapshot_stats.checks++;
+            if (previous->hash == t->hash && previous->bytes == bytes && previous->paletted == (uint32_t)paletted
+                && nv2a_vk_texture_hash_matches(mem + va, bytes, previous->data)
+                && (!paletted || nv2a_vk_texture_hash_matches(mem + s_palette_va, 1024, previous->palette))) {
+                s_texture_snapshot_stats.hits++;
+                t->used = t->checked = s_frame;
+                tex_perf_end(NFSU_PERF_TEX_HASH, perf_hash);
+                return t->view;
+            }
+        }
+        s_texture_snapshot_stats.captures++;
+        s_texture_snapshot_pending.bytes = bytes;
+        s_texture_snapshot_pending.paletted = paletted;
+        hash = nv2a_vk_texture_hash_capture(mem + va, bytes, s_texture_snapshot_pending.data);
+        if (paletted)
+            hash ^= nv2a_vk_texture_hash_capture(mem + s_palette_va, 1024, s_texture_snapshot_pending.palette) * 31u;
+        s_texture_snapshot_pending.hash = hash;
+    } else
+#endif
+    {
+        hash = bytes_hash(va, face ? face * 6 : tex_bytes(color, w, h, pitch));
+        if (color == 0x0B)
+            hash ^= bytes_hash(s_palette_va, 1024) * 31u;
+    }
     tex_perf_end(NFSU_PERF_TEX_HASH, perf_hash);
     if (t && t->hash == hash) {
+#ifdef __ANDROID__
+        if (snapshot_on) texture_snapshot_store(t);
+#endif
         t->used = t->checked = s_frame;
         return t->view;
     }
@@ -1446,6 +1526,9 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h, 
     }
     t->hash = hash;
     t->used = t->checked = s_frame;
+#ifdef __ANDROID__
+    if (snapshot_on) texture_snapshot_store(t);
+#endif
 
     for (f = 0; f < layers; f++)
         tex_fill(t, va + f * face, f);
@@ -4810,6 +4893,17 @@ static void vk_flip_impl(void)
     if (s_frame % 300 == 0) {
         pool_report();
 #ifdef __ANDROID__
+        if (s_texture_snapshot_mode == 1) {
+            NFS_LOG_INFO("performance", "[VKTEXS] frame=%u checks=%llu hits=%llu captures=%llu allocations=%llu oom=%llu skipped=%llu live=%u live_bytes=%zu (since report)\n",
+                s_frame, (unsigned long long)s_texture_snapshot_stats.checks,
+                (unsigned long long)s_texture_snapshot_stats.hits,
+                (unsigned long long)s_texture_snapshot_stats.captures,
+                (unsigned long long)s_texture_snapshot_stats.allocations,
+                (unsigned long long)s_texture_snapshot_stats.oom,
+                (unsigned long long)s_texture_snapshot_stats.skipped,
+                s_texture_snapshot_live, (size_t)s_texture_snapshot_live * sizeof(VkTextureHashSnapshot));
+            memset(&s_texture_snapshot_stats, 0, sizeof s_texture_snapshot_stats);
+        }
         if (index_stats_enabled()) {
             NFS_LOG_INFO("graphics", "[VKIDX] frame=%u fused=%d uploads16=%llu uploads32=%llu source_indices=%llu written_indices=%llu upload_bytes=%llu nonzero_base_indices=%llu expansion_bytes_avoided=%llu (since report)\n",
                 s_frame, index_fuse_enabled(), (unsigned long long)s_index_stats.uploads16,
