@@ -3381,6 +3381,40 @@ static uint32_t zmax_of(const uint32_t *r)
 }
 
 /* NV097 primitive -> Vulkan topology and (possibly rewritten) indices. */
+#ifdef __ANDROID__
+static int index_fuse_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        char property[PROP_VALUE_MAX] = {0};
+        const char *value = getenv("RECOMP_VK_INDEX_FUSE");
+        if (!value && __system_property_get("debug.nfsu.index_fuse", property) > 0)
+            value = property;
+        enabled = !value || !*value || !strcmp(value, "1");
+        NFS_LOG_INFO("graphics", "[VKIDX] fused=%d (startup only)\n", enabled);
+    }
+    return enabled;
+}
+
+static int index_stats_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        char property[PROP_VALUE_MAX] = {0};
+        const char *value = getenv("RECOMP_VK_INDEX_STATS");
+        if (!value && __system_property_get("debug.nfsu.index_stats", property) > 0)
+            value = property;
+        enabled = value && !strcmp(value, "1");
+    }
+    return enabled;
+}
+static struct {
+    uint64_t uploads16, uploads32, source_indices, written_indices, upload_bytes;
+    uint64_t nonzero_base_indices, expansion_bytes_avoided;
+} s_index_stats;
+#include "nv2a_vk_indices.h"
+#endif
+
 static uint32_t *s_prim_idx;
 static size_t    s_prim_cap;
 
@@ -3809,7 +3843,7 @@ static struct {
     int          compact_eligible, compact_selected;
     VkDeviceSize cat;                       /* first instance's constants */
     uint32_t     cb_gen;
-    uint32_t     prim, vertex_count, index_count;
+    uint32_t     prim, vertex_count, index_count, index_base;
     uint16_t     attr_present, attr_direct;
     uint32_t     vp_prog_gen, attr_const_gen, vtx_epoch, color_va, zeta_va;
     uint32_t     tex_va[4], pal_va[4];
@@ -3851,7 +3885,8 @@ static int pend_matches(const Nv2aRawBatch *b)
 {
     uint32_t a;
     if (b->xform != 2 || b->prim != s_pend.prim || b->vertex_count != s_pend.vertex_count
-     || b->index_count != s_pend.index_count || b->attr_present != s_pend.attr_present
+     || b->index_count != s_pend.index_count || b->index_base != s_pend.index_base
+     || b->attr_present != s_pend.attr_present
      || b->attr_direct != s_pend.attr_direct || b->vp_prog_gen != s_pend.vp_prog_gen
      || b->attr_const_gen != s_pend.attr_const_gen || b->vtx_epoch != s_pend.vtx_epoch
      || b->color_va != s_pend.color_va || b->zeta_va != s_pend.zeta_va
@@ -3896,6 +3931,7 @@ static void pend_hold(const Nv2aRawBatch *b, uint32_t n, VkDeviceSize cat, uint3
     s_pend.prim = b->prim;
     s_pend.vertex_count = b->vertex_count;
     s_pend.index_count = b->index_count;
+    s_pend.index_base = b->index_base;
     s_pend.attr_present = b->attr_present;
     s_pend.attr_direct = b->attr_direct;
     s_pend.vp_prog_gen = b->vp_prog_gen;
@@ -3960,7 +3996,7 @@ static void vk_draw_raw_impl(const Nv2aRawBatch *b)
     VkProg *p;
     Nv2aPshKey pk;
     const uint32_t *r = b->regs;
-    const uint32_t *idx;
+    const uint32_t *idx = NULL;
     uint32_t n, i, cls;
     VkPrimitiveTopology topo;
     VkDescriptorImageInfo img[4];
@@ -3974,6 +4010,10 @@ static void vk_draw_raw_impl(const Nv2aRawBatch *b)
     void *map;
     static VkPipeline cur_pipe;
     static uint32_t cur_pipe_gen;
+#ifdef __ANDROID__
+    VkIndexUpload index_upload;
+    int fuse_indices = index_fuse_enabled();
+#endif
 
     if (!ready())
         return;
@@ -3999,8 +4039,17 @@ static void vk_draw_raw_impl(const Nv2aRawBatch *b)
             return;
     }
     pend_flush();
-    if (!prim_indices(b, &idx, &n, &topo, &cls) || !n)
-        return;
+#ifdef __ANDROID__
+    if (fuse_indices) {
+        if (!index_upload_plan(b, &index_upload) || !index_upload.count) return;
+        n = index_upload.count;
+        topo = index_upload.topology;
+        cls = index_upload.primitive_class;
+    } else
+#endif
+    {
+        if (!prim_indices(b, &idx, &n, &topo, &cls) || !n) return;
+    }
     VT("draw: prim %u idx %u verts %u attrs %04X direct %04X xform %u surf %08X zeta %08X\n", b->prim, n,
        b->vertex_count, b->attr_present, b->attr_direct, b->xform, b->surface.color_va, b->zeta_va);
     s = target(&b->surface, b->zeta_va, &d, native_ui_color_only(r), 0);
@@ -4178,6 +4227,11 @@ static void vk_draw_raw_impl(const Nv2aRawBatch *b)
     if (!upload_vertices(b))
         return;
 #endif
+#ifdef __ANDROID__
+    if (fuse_indices) {
+        if (!upload_fused_indices(b, &index_upload)) return;
+    } else
+#endif
     {
         VkDeviceSize iat;
         if (b->vertex_count <= 65536) {
@@ -4195,6 +4249,20 @@ static void vk_draw_raw_impl(const Nv2aRawBatch *b)
             vkCmdBindIndexBuffer(s_cb, s_f->ring, iat, VK_INDEX_TYPE_UINT32);
         }
     }
+#ifdef __ANDROID__
+    if (index_stats_enabled()) {
+        if (b->vertex_count <= 65536) s_index_stats.uploads16++;
+        else s_index_stats.uploads32++;
+        s_index_stats.source_indices += b->index_count;
+        s_index_stats.written_indices += n;
+        s_index_stats.upload_bytes += (uint64_t)n * (b->vertex_count <= 65536 ? 2 : 4);
+        if (fuse_indices) {
+            if (b->index_base) s_index_stats.nonzero_base_indices += b->index_count;
+            if (b->prim == 3 || b->prim == 8)
+                s_index_stats.expansion_bytes_avoided += (uint64_t)n * 4;
+        }
+    }
+#endif
     {
         /* Constants last: repeats append theirs right behind (pend_append).
          * A draw that cannot start an instanced run, with the constants of
@@ -4727,6 +4795,15 @@ static void vk_flip_impl(void)
     if (s_frame % 300 == 0) {
         pool_report();
 #ifdef __ANDROID__
+        if (index_stats_enabled()) {
+            NFS_LOG_INFO("graphics", "[VKIDX] frame=%u fused=%d uploads16=%llu uploads32=%llu source_indices=%llu written_indices=%llu upload_bytes=%llu nonzero_base_indices=%llu expansion_bytes_avoided=%llu (since report)\n",
+                s_frame, index_fuse_enabled(), (unsigned long long)s_index_stats.uploads16,
+                (unsigned long long)s_index_stats.uploads32, (unsigned long long)s_index_stats.source_indices,
+                (unsigned long long)s_index_stats.written_indices, (unsigned long long)s_index_stats.upload_bytes,
+                (unsigned long long)s_index_stats.nonzero_base_indices,
+                (unsigned long long)s_index_stats.expansion_bytes_avoided);
+            memset(&s_index_stats, 0, sizeof s_index_stats);
+        }
         if (vertex_cache_mode()) {
             NFS_LOG_INFO("graphics", "[VKVTX] frame=%u mode=%d draws=%llu eligible=%llu hits=%llu copied_bytes=%llu reusable_bytes=%llu reused_bytes=%llu binds=%llu skipped_binds=%llu (since report)\n",
                 s_frame, vertex_cache_mode(),
@@ -5116,7 +5193,7 @@ static void vk_draw(const Nv2aSurface *s, const Nv2aBatch *b)
     (void)s; (void)b;                        /* draw_raw handles every batch */
 }
 
-static const Nv2aBackend s_backend = {
+static Nv2aBackend s_backend = {
     vk_clear,
     vk_draw,
     vk_flip,
@@ -5127,6 +5204,9 @@ static const Nv2aBackend s_backend = {
 
 void nv2a_vk_install(void)
 {
+#ifdef __ANDROID__
+    if (index_fuse_enabled()) s_backend.flags |= NV2A_BACKEND_INDEX_BASE;
+#endif
     nv2a_backend_register(&s_backend);
     NFS_LOG_INFO("graphics", "[BOOT] NV2A Vulkan renderer registered\n");
 }

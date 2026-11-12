@@ -40,6 +40,7 @@
 #include "../d3d/d3d8_dxt.h"
 #include "nv2a_backend.h"
 #include "nv2a_indices.h"
+#include "nv2a_raw_indices.h"
 #include "nv2a_ui_marker.h"
 #ifdef __ANDROID__
 #include "nv2a_fence_wait.h"
@@ -3248,6 +3249,7 @@ void (*nv2a_raw_batch_hook)(Nv2aRawBatch *rb, float *attrs);
 static void raw_batch(void)
 {
     Nv2aRawBatch rb;
+    int index_direct = nv2a_raw_indices_direct(s_backend->flags, nv2a_raw_batch_hook != NULL);
     uint32_t lo = 0xFFFFFFFFu, hi = 0, i, a, nv;
     uint16_t present = 0, direct = 0;
 
@@ -3271,12 +3273,12 @@ static void raw_batch(void)
         s_raw_attrs = (float *)malloc((size_t)s_raw_cap_v * NV2A_RAW_ATTRS * 4
                                       * sizeof(float));
     }
-    if (s_gpu.idx_count > s_raw_cap_i) {
+    if (!index_direct && s_gpu.idx_count > s_raw_cap_i) {
         free(s_raw_idx);
         s_raw_cap_i = s_gpu.idx_count + 1024;
         s_raw_idx = (uint32_t *)malloc((size_t)s_raw_cap_i * sizeof(uint32_t));
     }
-    if (!s_raw_attrs || !s_raw_idx)
+    if (!s_raw_attrs || (!index_direct && !s_raw_idx))
         return;
     for (a = 0; a < NV2A_RAW_ATTRS && a < NV_VERTEX_ATTRS; a++)
         if (s_gpu.attr[a].size && s_gpu.attr[a].stride)
@@ -3306,15 +3308,12 @@ static void raw_batch(void)
             }
         }
     }
-    for (i = 0; i < s_gpu.idx_count; i++)
-        s_raw_idx[i] = s_gpu.idx[i] - lo;
+    nv2a_raw_indices_bind(&rb, index_direct, s_gpu.idx, s_raw_idx, s_gpu.idx_count, lo);
 
     rb.prim = s_gpu.prim;
     rb.vertex_count = nv;
     rb.attr_present = present;
     rb.attrs = s_raw_attrs;
-    rb.indices = s_raw_idx;
-    rb.index_count = s_gpu.idx_count;
     rb.regs = s_reg;
     rb.vp_program = (const uint32_t (*)[4])s_vp.prog;
     rb.vp_slots = VP_SLOTS;
