@@ -34,6 +34,9 @@ Override it with `-Pnfsu.xbe=/path/to/default.xbe`; use
 Android lifted code defaults to `-O2`, with FP contraction disabled. Use
 `-Pnfsu.genOpt=-O1` for a compiler return/repeat comparison. CPU-heavy audio
 voice processing and final mixdown also use `-O2` in Debug builds.
+Android manual game wrappers use `-O2` with the generated code's aliasing,
+integer-wrap and separate-FP-operation constraints; see
+[the wrapper validation report](../docs/android-manual-wrappers-o2.md).
 Generation tracks its inputs and writes under `android/app/build/`, so `clean` removes
 all generated Android sources. No game data is packaged in the APK.
 
