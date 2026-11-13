@@ -1,0 +1,11 @@
+#version 450
+layout(local_size_x=1) in;
+// Integer reads preserve every std140 byte, including NaNs and padding.
+layout(set=0, binding=0, std140) uniform Vertex { uvec4 words[7]; } vs;
+layout(set=0, binding=1, std140) uniform Fragment { uvec4 words[24]; } fs;
+layout(set=0, binding=2, std430) buffer Output { uvec4 words[]; } result;
+layout(push_constant) uniform Push { uint index; };
+void main() {
+    for (uint i=0; i<7; i++) result.words[index*31+i] = vs.words[i];
+    for (uint i=0; i<24; i++) result.words[index*31+7+i] = fs.words[i];
+}

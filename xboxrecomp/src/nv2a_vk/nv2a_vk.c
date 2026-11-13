@@ -3880,6 +3880,8 @@ typedef struct {
     float pad[2];
 } FsBlock;
 
+#include "nv2a_vk_uniforms.h"
+
 /* ── Instancing ───────────────────────────────────────────────────────
  *
  * A quarter of a race frame's draws repeat the previous draw with only the
@@ -4273,54 +4275,8 @@ static void vk_draw_raw_impl(const Nv2aRawBatch *b)
     apply_dynamic(r, d != NULL, topo);
     set_surface_scissor(r, s);
 
-    /* Uniforms. */
-    {
-        VsBlock *vb;
-        FsBlock *fb;
-        VkDeviceSize vat = ring_alloc(sizeof(VsBlock), s_ubo_align, &map);
-        vb = (VsBlock *)map;
-        if (!vb) return;
-        vb->surf[0] = 2.0f / (float)s->w;
-        vb->surf[1] = 2.0f / (float)s->h;
-        vb->surf[2] = 1.0f / (float)zmax_of(r);
-        vb->surf[3] = 0.5f - 0.5f * (float)s->w / (float)s->pw; /* see nv2a_snap */
-        vb->snap_y = 0.5f - 0.5f * (float)s->h / (float)s->ph;
-        memcpy(vb->m, b->composite, sizeof vb->m);
-        memcpy(vb->vpoff, b->vp_offset, sizeof vb->vpoff);
-        vb->aa[0] = b->aa_sx > 0 ? b->aa_sx : 1.0f;
-        vb->aa[1] = b->aa_sy > 0 ? b->aa_sy : 1.0f;
-        vb->xform = b->xform == 1 ? 1 : 0;
-        ub[0].buffer = s_f->ring;
-        ub[0].offset = vat;
-        ub[0].range = sizeof(VsBlock);
-
-        {
-            VkDeviceSize fat = ring_alloc(sizeof(FsBlock), s_ubo_align, &map);
-            fb = (FsBlock *)map;
-            if (!fb) return;
-            memset(fb, 0, sizeof *fb);
-            for (i = 0; i < 4; i++) {
-                fb->tscale[i][0] = tscale[i][0];
-                fb->tscale[i][1] = tscale[i][1];
-            }
-            for (i = 0; i < 8; i++) {
-                argb_vec4(r[0xA60 / 4 + i], fb->c0[i]);
-                argb_vec4(r[0xA80 / 4 + i], fb->c1[i]);
-            }
-            argb_vec4(r[0x1E20 / 4], fb->fc0);
-            argb_vec4(r[0x1E24 / 4], fb->fc1);
-            {
-                uint32_t fc = r[0x2A8 / 4];
-                fb->fog[0] = byte_f(fc, 0); fb->fog[1] = byte_f(fc, 8);
-                fb->fog[2] = byte_f(fc, 16); fb->fog[3] = byte_f(fc, 24);
-            }
-            fb->afunc = r[0x300 / 4] ? (int32_t)r[0x33C / 4] : 0x207;
-            fb->aref = (float)(r[0x340 / 4] & 0xFF);
-            ub[1].buffer = s_f->ring;
-            ub[1].offset = fat;
-            ub[1].range = sizeof(FsBlock);
-        }
-    }
+    /* Ordinary std140 blocks, with immutable ring-range reuse on Android. */
+    if (!uniform_upload(b, s, r, tscale, ub)) return;
 #ifndef __ANDROID__
     if (!upload_vertices(b))
         return;
@@ -4893,6 +4849,18 @@ static void vk_flip_impl(void)
     if (s_frame % 300 == 0) {
         pool_report();
 #ifdef __ANDROID__
+        if (uniform_cache_mode()) {
+            NFS_LOG_INFO("performance", "[VKUBO] frame=%u vs_requests=%llu vs_hits=%llu fs_requests=%llu fs_hits=%llu vs_skipped=%llu fs_skipped=%llu uploaded_bytes=%llu reused_bytes=%llu (since report)\n",
+                s_frame, (unsigned long long)s_uniform_stats.vs_requests,
+                (unsigned long long)s_uniform_stats.vs_hits,
+                (unsigned long long)s_uniform_stats.fs_requests,
+                (unsigned long long)s_uniform_stats.fs_hits,
+                (unsigned long long)s_uniform_stats.vs_skipped,
+                (unsigned long long)s_uniform_stats.fs_skipped,
+                (unsigned long long)s_uniform_stats.uploaded_bytes,
+                (unsigned long long)s_uniform_stats.reused_bytes);
+            memset(&s_uniform_stats, 0, sizeof s_uniform_stats);
+        }
         if (s_texture_snapshot_mode == 1) {
             NFS_LOG_INFO("performance", "[VKTEXS] frame=%u checks=%llu hits=%llu captures=%llu allocations=%llu oom=%llu skipped=%llu live=%u live_bytes=%zu (since report)\n",
                 s_frame, (unsigned long long)s_texture_snapshot_stats.checks,

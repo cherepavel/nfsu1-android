@@ -44,6 +44,9 @@ RECOMP_QUIET=1
 # Ordinary descriptor allocation reuse: default 1; 0 per-draw allocation. Restart.
 # Explicit native-push/dynamic-descriptor experiments take precedence.
 # RECOMP_VK_DESCRIPTOR_REUSE=0
+# Immutable uniform-block reuse: default 1 on Android. Restart.
+# Set 0 to rebuild/upload both ordinary uniform blocks on every draw.
+# RECOMP_VK_UNIFORM_CACHE=0
 # Bulk shader constant packets: default 1 on Android, packets >=16 dwords.
 # Set 0 for the previous scalar packet loop. Restart.
 # RECOMP_PB_CONST_BULK=0
