@@ -53,6 +53,9 @@ RECOMP_QUIET=1
 # Compare saved texture samples for 1–4 KiB spans: default 1 on Android.
 # Set 0 for the previous hash check. Restart.
 # RECOMP_VK_TEXTURE_SAMPLES=0
+# Paletted texture tiles + NEON stores on Android ARM64, power-of-two 8–512 per axis.
+# Default 1; set 0 for the previous per-pixel decode loop. Restart.
+# RECOMP_VK_INDEXED_TILES=0
 # RECOMP_FPS_LOG=1
 # RECOMP_VK_TRACE=1
 # XBOX_LOG_LEVEL=3
