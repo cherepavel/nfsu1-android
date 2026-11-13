@@ -1,4 +1,4 @@
-# Android manual wrapper O2 candidate
+# Android manual wrapper O2
 
 14 November 2026. Branch `codex/manual-wrappers-o2` from `develop` at
 `5842802`, after the validated APU peak feature was merged.
@@ -65,7 +65,7 @@ APK: `android/app/build/outputs/apk/debug/app-debug.apk`.
 - SHA-256: `06085907ae6ec94362a3036631fa3435134630cb81a0951849446ce45be4aac4`.
 - Native build ID: `e648ef8a051a0d5d60745da07631cdb27f6d705e`.
 
-The candidate is ready for the user's APK installation and ordinary race,
-audio, menu and control checks before merge. The agent has not installed or
-restarted this candidate or changed persistent settings. Gameplay feedback
-for the preceding APU APK does not validate this new APK.
+On 14 November the user reported "работает" in response to the new APK
+handoff. This supplies gameplay acceptance for merging this feature into
+`develop`; it does not establish a controlled CPU or FPS gain. The agent has
+not installed or restarted this candidate or changed persistent settings.
