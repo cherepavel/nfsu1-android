@@ -23,6 +23,7 @@
 #include "apu_state.h"
 #include "fpconv.h"
 #include "apu_filter_neon.h"
+#include "apu_peak.h"
 #ifdef __ANDROID__
 #include <sys/system_properties.h>
 #endif
@@ -43,6 +44,26 @@ static int apu_filter_neon_enabled(void)
 #endif
         mode = !value || !*value || !strcmp(value, "1");
         NFS_LOG_INFO("audio", "[APUFILTER] neon=%d (startup only)\n", mode);
+    }
+    return mode;
+#else
+    return 0;
+#endif
+}
+
+static int apu_peak_optimized(void)
+{
+#if defined(__ANDROID__) || defined(APU_PEAK_TEST)
+    static int mode = -1;
+    if (mode < 0) {
+        const char *value = getenv("RECOMP_APU_PEAK_OPT");
+#ifdef __ANDROID__
+        char property[PROP_VALUE_MAX] = {0};
+        if (!value && __system_property_get("debug.nfsu.apu_peak_opt", property) > 0)
+            value = property;
+#endif
+        mode = !value || !*value || !strcmp(value, "1");
+        NFS_LOG_INFO("audio", "[APUPEAK] optimized=%d neon=%d (startup only)\n", mode, APU_PEAK_HAS_NEON);
     }
     return mode;
 #else
@@ -1176,6 +1197,8 @@ static void vdump_frame(MCPXAPUState *d, uint16_t v, float post[][2], int fmode,
     }
 }
 
+static int apu_vp_trace_enabled(void);
+
 static void voice_process(MCPXAPUState *d,
                           float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME],
                           float sample_buf[NUM_SAMPLES_PER_FRAME][2],
@@ -1261,7 +1284,8 @@ static void voice_process(MCPXAPUState *d,
                                 NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE);
     if (!active) return;
 
-    {   /* RECOMP_APU_TRACE: what the unpaused voices hold */
+    if (!apu_peak_optimized() || apu_vp_trace_enabled()) {
+        /* Keep the original trace peak calculation whenever trace is on. */
         extern void apu_vp_trace_voice(MCPXAPUState *d, uint16_t v, float peak, float ea);
         float pk = 0.0f;
         for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++)
@@ -1421,11 +1445,16 @@ static float g_vp_mix_peak;
 static int   g_tr_on = -1, g_tr_unpaused, g_tr_sounding;
 static char  g_tr_quiet[200], g_tr_loud[200];
 
+static int apu_vp_trace_enabled(void)
+{
+    if (g_tr_on < 0) g_tr_on = getenv("RECOMP_APU_TRACE") != NULL;
+    return g_tr_on;
+}
+
 void apu_vp_trace_voice(MCPXAPUState *d, uint16_t v, float peak, float ea)
 {
     char *dst;
-    if (g_tr_on < 0) g_tr_on = getenv("RECOMP_APU_TRACE") != NULL;
-    if (!g_tr_on) return;
+    if (!apu_vp_trace_enabled()) return;
     g_tr_unpaused++;
     if (peak > 0.0f) g_tr_sounding++;
     dst = peak > 0.0f ? g_tr_loud : g_tr_quiet;
@@ -1459,6 +1488,20 @@ void apu_vp_get_stats(int *voices, float *mix_peak)
     *mix_peak = g_vp_mix_peak;
     g_vp_voices_max = 0;
     g_vp_mix_peak = 0.0f;
+}
+
+static void apu_vp_note_peak(const float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME])
+{
+    if (apu_peak_optimized()) {
+        _Static_assert(NUM_SAMPLES_PER_FRAME == APU_PEAK_ROW_SAMPLES, "peak row size");
+        g_vp_mix_peak = apu_peak_abs_rows(mixbins, NUM_MIXBINS, g_vp_mix_peak);
+    } else {
+        for (int b = 0; b < NUM_MIXBINS; b++)
+            for (int s = 0; s < NUM_SAMPLES_PER_FRAME; s++) {
+                float a = fabsf(mixbins[b][s]);
+                if (a > g_vp_mix_peak) g_vp_mix_peak = a;
+            }
+    }
 }
 
 void mcpx_apu_vp_frame(MCPXAPUState *d,
@@ -1498,11 +1541,7 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
     }
     if (g_vp_voices_now > g_vp_voices_max)
         g_vp_voices_max = g_vp_voices_now;
-    for (int b = 0; b < NUM_MIXBINS; b++)
-        for (int s = 0; s < NUM_SAMPLES_PER_FRAME; s++) {
-            float a = fabsf(mixbins[b][s]);
-            if (a > g_vp_mix_peak) g_vp_mix_peak = a;
-        }
+    apu_vp_note_peak(mixbins);
     apu_vp_trace_second();
 #if defined(__ANDROID__) && APU_FILTER_HAS_NEON
     if (apu_filter_neon_enabled()) {

@@ -21,7 +21,7 @@ state = (root/'xboxrecomp/src/apu/apu_state.h').read_text()
 start = state.index('#define flush_to_zero'); end = state.index('/* ============================================================', start)
 (out/'filter_scalar.h').write_text(state[start:end])
 source = (root/'xboxrecomp/src/apu/apu_vp.c').read_text()
-start = source.index('static int apu_filter_neon_enabled('); end = source.index('/* #define DEBUG_MCPX */',start)
+start = source.index('static int apu_filter_neon_enabled('); end = source.index('static int apu_peak_optimized(',start)
 (out/'filter_selector.h').write_text(source[start:end])
 cmd = shlex.split(a.cc)+['-O2','-std=gnu11','-ffp-contract=off','-fstack-protector-strong',
     '-ffunction-sections','-fdata-sections','-I'+str(root/'xboxrecomp/src'),
