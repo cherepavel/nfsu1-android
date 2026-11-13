@@ -22,6 +22,33 @@
 
 #include "apu_state.h"
 #include "fpconv.h"
+#include "apu_filter_neon.h"
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
+#if APU_FILTER_HAS_NEON
+static uint64_t s_filter_paired_blocks, s_filter_fallback_blocks;
+#endif
+
+static int apu_filter_neon_enabled(void)
+{
+#if APU_FILTER_HAS_NEON && (defined(__ANDROID__) || defined(APU_FILTER_NEON_TEST))
+    static int mode = -1;
+    if (mode < 0) {
+        const char *value = getenv("RECOMP_APU_FILTER_NEON");
+#ifdef __ANDROID__
+        char property[PROP_VALUE_MAX] = {0};
+        if (!value && __system_property_get("debug.nfsu.apu_filter_neon", property) > 0)
+            value = property;
+#endif
+        mode = !value || !*value || !strcmp(value, "1");
+        NFS_LOG_INFO("audio", "[APUFILTER] neon=%d (startup only)\n", mode);
+    }
+    return mode;
+#else
+    return 0;
+#endif
+}
 
 /* #define DEBUG_MCPX */
 
@@ -1295,6 +1322,7 @@ static void voice_process(MCPXAPUState *d,
         lpf = stereo ? (fmode == 1) : (fmode & 1) != 0;
     }
     if (lpf) {
+        int paired = apu_filter_neon_enabled();
         for (int ch = 0; ch < 2; ch++) {
             int16_t fc = (int16_t)voice_get_mask(
                 d, v, NV_PAVS_VOICE_TAR_FCA + (ch % channels) * 4,
@@ -1306,11 +1334,27 @@ static void voice_process(MCPXAPUState *d,
             float q_f = clampf(q / (1.0f * 0x8000), 0.079407f, 1.0f);
             sv_filter *filter = &d->vp.filters[v].svf[ch];
             setup_svf(filter, fc_f, q_f, F_LP);
-            for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
-                samples[i][ch] = run_svf(filter, samples[i][ch]);
-                samples[i][ch] = fminf(fmaxf(samples[i][ch], -1.0f), 1.0f);
+            if (!paired) {
+                for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
+                    samples[i][ch] = run_svf(filter, samples[i][ch]);
+                    samples[i][ch] = fminf(fmaxf(samples[i][ch], -1.0f), 1.0f);
+                }
             }
         }
+#if APU_FILTER_HAS_NEON
+        if (paired) {
+            if (apu_filter_lowpass_pair(d->vp.filters[v].svf, samples, NUM_SAMPLES_PER_FRAME))
+                s_filter_paired_blocks++;
+            else {
+                s_filter_fallback_blocks++;
+                for (int ch = 0; ch < 2; ch++) {
+                    sv_filter *filter = &d->vp.filters[v].svf[ch];
+                    for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++)
+                        samples[i][ch] = fminf(fmaxf(run_svf(filter, samples[i][ch]), -1.0f), 1.0f);
+                }
+            }
+        }
+#endif
     }
 
     if (vdump)
@@ -1460,6 +1504,16 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
             if (a > g_vp_mix_peak) g_vp_mix_peak = a;
         }
     apu_vp_trace_second();
+#if defined(__ANDROID__) && APU_FILTER_HAS_NEON
+    if (apu_filter_neon_enabled()) {
+        static unsigned report_frames;
+        if (++report_frames == 15000) {
+            NFS_LOG_INFO("performance", "[APUFILTER] vp_frames=15000 paired_blocks=%llu fallback_blocks=%llu (since report)\n",
+                (unsigned long long)s_filter_paired_blocks, (unsigned long long)s_filter_fallback_blocks);
+            report_frames = 0; s_filter_paired_blocks = s_filter_fallback_blocks = 0;
+        }
+    }
+#endif
     {   /* RECOMP_APU_RING_STATS=1: stale ring reads every 10 s (Linux; the
          * Switch prints them in its [perf] report) */
         static int on = -1;

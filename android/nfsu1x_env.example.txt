@@ -32,6 +32,9 @@ RECOMP_QUIET=1
 # RECOMP_APU_TRACE=1
 
 # Numeric/explicit switches:
+# Paired-channel low-pass filter on Android ARM64: default 1.
+# Set 0 for the original scalar filter. Fully restart after editing.
+# RECOMP_APU_FILTER_NEON=0
 # Adaptive screen aspect + FOV; proportional racing HUD, stretched menus.
 # Default on. Set 0 for the previous presentation; restart after editing.
 # RECOMP_ADAPTIVE_WIDESCREEN=0
