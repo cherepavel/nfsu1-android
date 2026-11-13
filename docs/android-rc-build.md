@@ -28,6 +28,7 @@ than requiring users to reproduce the investigation's device properties.
 | Uniform block reuse | On on Android, with per-stage backoff on misses | debug.nfsu.uniform_cache=0 restores per-draw block construction/upload; next process |
 | Bulk shader constant packets | On on Android for packets of 16–32 dwords | debug.nfsu.const_bulk=0 restores the scalar packet loop; next process |
 | Small texture sample snapshots | On on Android for 1–4 KiB source spans | debug.nfsu.tex_samples=0 restores the existing hash check; next process |
+| Paletted texture tile decoding | On on Android ARM64 for power-of-two dimensions 8–512 per axis | debug.nfsu.indexed_tiles=0 restores the previous per-pixel loop; next process |
 | Early reflection assembly | On on Android | debug.nfsu.cube_early=0; environment override still takes precedence |
 | Scoped render-pass consumer barrier | On on Android | debug.nfsu.pass_barrier=0, live at the next poll |
 | Early-submit draw threshold | 300, unchanged | debug.nfsu.vk_kick=N, next process |

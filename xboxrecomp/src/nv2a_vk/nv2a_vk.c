@@ -1120,6 +1120,28 @@ static void swizzle_tables(uint32_t w, uint32_t h)
     s_swz_h = h;
 }
 
+#ifdef __ANDROID__
+#include "nv2a_vk_indexed.h"
+static struct {
+    uint64_t calls, tiled, scalar, invalid, tiled_pixels, scalar_pixels;
+} s_indexed_stats;
+
+static int indexed_tiles_enabled(void)
+{
+    static int mode = -1;
+    if (mode < 0) {
+        char property[PROP_VALUE_MAX] = {0};
+        const char *value = getenv("RECOMP_VK_INDEXED_TILES");
+        if (!value && __system_property_get("debug.nfsu.indexed_tiles", property) > 0)
+            value = property;
+        mode = !value || !*value || !strcmp(value, "1");
+        NFS_LOG_INFO("graphics", "[VKP8] tiles=%d neon=%d max_dimension=512 (startup only)\n",
+            mode, NV2A_VK_INDEXED_NEON);
+    }
+    return mode;
+}
+#endif
+
 static int decode_indexed(uint32_t va, uint32_t w, uint32_t h, uint32_t *out)
 {
     const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
@@ -1127,12 +1149,31 @@ static int decode_indexed(uint32_t va, uint32_t w, uint32_t h, uint32_t *out)
     const uint8_t *idx = mem + va;
     uint32_t x, y;
     uint32_t pal[256];
-    if (!(s_palette_reg & ~0x3Fu))
+#ifdef __ANDROID__
+    int tiles = indexed_tiles_enabled();
+    if (tiles) s_indexed_stats.calls++;
+#endif
+    if (!(s_palette_reg & ~0x3Fu)) {
+#ifdef __ANDROID__
+        if (tiles) s_indexed_stats.invalid++;
+#endif
         return 0;
+    }
     memcpy(pal, mem + s_palette_va, entries * 4);
     for (x = entries; x < 256; x++)
         pal[x] = pal[0];                     /* past the end reads entry 0 */
     swizzle_tables(w, h);
+#ifdef __ANDROID__
+    if (tiles && nv2a_vk_indexed_tiles(idx, w, h, pal, s_swz_x, s_swz_y, out)) {
+        s_indexed_stats.tiled++;
+        s_indexed_stats.tiled_pixels += (uint64_t)w * h;
+        return 1;
+    }
+    if (tiles) {
+        s_indexed_stats.scalar++;
+        s_indexed_stats.scalar_pixels += (uint64_t)w * h;
+    }
+#endif
     for (y = 0; y < h; y++) {
         const uint8_t *row = idx + s_swz_y[y];
         uint32_t *o = out + (size_t)y * w;
@@ -4849,6 +4890,16 @@ static void vk_flip_impl(void)
     if (s_frame % 300 == 0) {
         pool_report();
 #ifdef __ANDROID__
+        if (indexed_tiles_enabled()) {
+            NFS_LOG_INFO("performance", "[VKP8] frame=%u calls=%llu tiled=%llu scalar=%llu invalid=%llu tiled_pixels=%llu scalar_pixels=%llu (since report)\n",
+                s_frame, (unsigned long long)s_indexed_stats.calls,
+                (unsigned long long)s_indexed_stats.tiled,
+                (unsigned long long)s_indexed_stats.scalar,
+                (unsigned long long)s_indexed_stats.invalid,
+                (unsigned long long)s_indexed_stats.tiled_pixels,
+                (unsigned long long)s_indexed_stats.scalar_pixels);
+            memset(&s_indexed_stats, 0, sizeof s_indexed_stats);
+        }
         if (uniform_cache_mode()) {
             NFS_LOG_INFO("performance", "[VKUBO] frame=%u vs_requests=%llu vs_hits=%llu fs_requests=%llu fs_hits=%llu vs_skipped=%llu fs_skipped=%llu uploaded_bytes=%llu reused_bytes=%llu (since report)\n",
                 s_frame, (unsigned long long)s_uniform_stats.vs_requests,
