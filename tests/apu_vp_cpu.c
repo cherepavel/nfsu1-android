@@ -59,6 +59,16 @@ static void setup(MCPXAPUState *d, unsigned v, unsigned mode)
 
 int main(int argc, char **argv)
 {
+#ifdef APU_REPLAY_PEAK
+    if(argc==3 && !strcmp(argv[1],"--trace-check")) {
+        int expected=atoi(argv[2]);
+        assert(apu_vp_trace_enabled()==expected);
+        if(expected) unsetenv("RECOMP_APU_TRACE");
+        else setenv("RECOMP_APU_TRACE","1",1);
+        assert(apu_vp_trace_enabled()==expected);
+        return 0;
+    }
+#endif
     assert(argc==2);
     int bench = !strcmp(argv[1],"bench");
     FILE *out=bench?NULL:fopen(argv[1],"wb"); assert(bench||out);
@@ -85,12 +95,21 @@ int main(int argc, char **argv)
 #endif
         unsigned v=(mode&32)?64:0;
         setup(d,v,mode);
+#ifdef APU_REPLAY_PEAK
+        g_vp_mix_peak=0;
+        g_tr_unpaused=g_tr_sounding=0;
+        memset(g_tr_quiet,0,sizeof g_tr_quiet);
+        memset(g_tr_loud,0,sizeof g_tr_loud);
+#endif
         clock_t start=clock();
         for(unsigned f=0;f<frames;f++) {
             memset(bins,0,sizeof(bins)); memset(samples,0,sizeof(samples));
             for(unsigned i=0;i<NUM_SAMPLES_PER_FRAME;i++)
                 bins[31][i]=((int)((f*17+i*31)%257)-128)/128.0f;
             voice_process(d,bins,samples,v,2);
+#ifdef APU_REPLAY_PEAK
+            apu_vp_note_peak(bins);
+#endif
             d->ep_frame_div=f%8;
             mcpx_apu_dsp_frame(d,bins);
             if(!bench) {
@@ -109,6 +128,13 @@ int main(int argc, char **argv)
                     assert(fwrite(&op,sizeof(op),1,out)==1);
                 }
                 assert(fwrite(apu_phys(0x10000+v*NV_PAVS_SIZE),NV_PAVS_SIZE,1,out)==1);
+#ifdef APU_REPLAY_PEAK
+                assert(fwrite(&g_vp_mix_peak,sizeof g_vp_mix_peak,1,out)==1);
+                assert(fwrite(&g_tr_unpaused,sizeof g_tr_unpaused,1,out)==1);
+                assert(fwrite(&g_tr_sounding,sizeof g_tr_sounding,1,out)==1);
+                assert(fwrite(g_tr_quiet,sizeof g_tr_quiet,1,out)==1);
+                assert(fwrite(g_tr_loud,sizeof g_tr_loud,1,out)==1);
+#endif
             }
         }
         elapsed+=clock()-start;
