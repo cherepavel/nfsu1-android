@@ -4,11 +4,18 @@
 #include "../xboxrecomp/src/apu/apu_vp.c"
 #include "../xboxrecomp/src/apu/apu_dsp.c"
 #include <time.h>
+#ifdef APU_REPLAY_REAL_DEVBUS
+#include <sys/mman.h>
+extern void xbox_ContiguousSetPhysicalRange(uint32_t lo, uint32_t hi);
+#define APU_REPLAY_RAM_SIZE ((size_t)0x80100000u)
+#endif
 
 uint8_t *g_apu_ram_ptr;
 struct McpxApuDebug g_dbg;
 int g_dbg_voice_monitor = -1;
+#ifndef APU_REPLAY_REAL_DEVBUS
 int xbox_ContiguousIsPhysical(uint32_t phys) { (void)phys; return 0; }
+#endif
 
 static void setup(MCPXAPUState *d, unsigned v, unsigned mode)
 {
@@ -56,14 +63,26 @@ int main(int argc, char **argv)
     int bench = !strcmp(argv[1],"bench");
     FILE *out=bench?NULL:fopen(argv[1],"wb"); assert(bench||out);
     MCPXAPUState *d=calloc(1,sizeof(*d)); assert(d);
+#ifdef APU_REPLAY_REAL_DEVBUS
+    g_apu_ram_ptr=mmap(NULL,APU_REPLAY_RAM_SIZE,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    assert(g_apu_ram_ptr!=MAP_FAILED);
+    const unsigned scenarios=128;
+#else
     g_apu_ram_ptr=calloc(1,0x100000); assert(g_apu_ram_ptr);
+    const unsigned scenarios=64;
+#endif
     static float bins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME];
     static float samples[NUM_SAMPLES_PER_FRAME][2];
     clock_t elapsed=0;
     unsigned frames=bench?4096:128, nonzero=0;
     downmix_init();
-    for(unsigned mode=0;mode<64;mode++) {
+    for(unsigned scenario=0;scenario<scenarios;scenario++) {
+        unsigned mode=scenario%64;
         memset(d,0,sizeof(*d)); memset(g_apu_ram_ptr,0,0x100000);
+#ifdef APU_REPLAY_REAL_DEVBUS
+        memset(g_apu_ram_ptr+0x80000000u,0,0x100000);
+        xbox_ContiguousSetPhysicalRange(scenario<64?0:0x10000,scenario<64?0:0x20000);
+#endif
         unsigned v=(mode&32)?64:0;
         setup(d,v,mode);
         clock_t start=clock();
@@ -89,7 +108,7 @@ int main(int argc, char **argv)
                     ptrdiff_t op=sv->op ? (char*)sv->op-(char*)sv : -1;
                     assert(fwrite(&op,sizeof(op),1,out)==1);
                 }
-                assert(fwrite(g_apu_ram_ptr+0x10000+v*NV_PAVS_SIZE,NV_PAVS_SIZE,1,out)==1);
+                assert(fwrite(apu_phys(0x10000+v*NV_PAVS_SIZE),NV_PAVS_SIZE,1,out)==1);
             }
         }
         elapsed+=clock()-start;
@@ -97,6 +116,11 @@ int main(int argc, char **argv)
     assert(bench||nonzero);
     if(out) assert(!fclose(out));
     fprintf(stderr,"PASS: %u production voice/mixdown frames, 3D/2D, mono/stereo, LPF, envelopes and monitor routing; %.3f CPU ms%s\n",
-        frames*64,1000.0*elapsed/CLOCKS_PER_SEC,bench?" (benchmark)":" (includes output I/O)");
-    free(g_apu_ram_ptr); free(d);
+        frames*scenarios,1000.0*elapsed/CLOCKS_PER_SEC,bench?" (benchmark)":" (includes output I/O)");
+#ifdef APU_REPLAY_REAL_DEVBUS
+    assert(!munmap(g_apu_ram_ptr,APU_REPLAY_RAM_SIZE));
+#else
+    free(g_apu_ram_ptr);
+#endif
+    free(d);
 }
