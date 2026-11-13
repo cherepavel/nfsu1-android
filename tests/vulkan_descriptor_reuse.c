@@ -18,6 +18,8 @@ static VkDevice s_dev;
 static VkDescriptorSetLayout s_dsl = (VkDescriptorSetLayout)(uintptr_t)1;
 static VkDescriptorSetLayout s_pp_dsl = (VkDescriptorSetLayout)(uintptr_t)2;
 static uint32_t s_frame;
+static uint32_t s_cb_gen;
+static int s_android_descriptor_contents;
 static int s_android_dynamic_descriptors, s_android_descriptor_reuse = 1;
 static unsigned allocations, updates, binds, resets, creates;
 static int fail_create, fail_allocate;
@@ -113,6 +115,7 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindDescriptorSets(VkCommandBuffer command,
 }
 
 #include "nv2a_vk_descriptor_reuse.h"
+#include "nv2a_vk_descriptor_contents.h"
 static void android_descriptor_cache_reset(Frame *frame) { (void)frame; }
 #include "descriptor_reset_under_test.h"
 #include "descriptor_adapter_under_test.h"
@@ -120,8 +123,13 @@ static void android_descriptor_cache_reset(Frame *frame) { (void)frame; }
 #define PROP_VALUE_MAX 92
 static int __system_property_get(const char *name, char *out)
 {
+#ifdef TEST_DESCRIPTOR_CONTENTS
+    assert(!strcmp(name, "debug.nfsu.descriptor_contents"));
+    const char *property = getenv("CONTENTS_TEST_PROPERTY");
+#else
     assert(!strcmp(name, "debug.nfsu.descriptor_reuse"));
     const char *property = getenv("REUSE_TEST_PROPERTY");
+#endif
     return snprintf(out, PROP_VALUE_MAX, "%s", property ? property : "");
 }
 #include "descriptor_selector_under_test.h"
@@ -158,6 +166,7 @@ static void draw(unsigned value, int present, unsigned command_buffer)
         VK_PIPELINE_BIND_POINT_GRAPHICS, VK_NULL_HANDLE, 0, count, writes);
 }
 
+#ifndef TEST_DESCRIPTOR_CONTENTS
 int main(int argc, char **argv)
 {
     if (argc == 3 && !strcmp(argv[1], "--selector")) {
@@ -219,3 +228,4 @@ int main(int argc, char **argv)
     }
     puts("Descriptor allocations: fenced frame ownership, unique sets per recording, ordinary writes, layout isolation, high-water growth, capacity, failures and rollback: PASS");
 }
+#endif

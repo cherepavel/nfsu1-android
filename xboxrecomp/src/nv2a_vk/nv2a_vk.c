@@ -275,6 +275,7 @@ static int s_dyn_valid;
 static VkDescriptorSetLayout s_dsl, s_pp_dsl;
 static int s_android_dynamic_descriptors;
 static int s_android_descriptor_reuse;
+static int s_android_descriptor_contents;
 static void android_descriptor_cache_reset(Frame *frame);
 #include "nv2a_vk_android.h"
 #include "nv2a_vk_push_descriptors.h"
@@ -286,6 +287,16 @@ static int android_descriptor_reuse_requested(void)
     const char *value = getenv("RECOMP_VK_DESCRIPTOR_REUSE");
     if (!value && __system_property_get("debug.nfsu.descriptor_reuse", property) > 0)
         value = property;
+    return !value || !*value || !strcmp(value, "1");
+}
+
+static int android_descriptor_contents_requested(void)
+{
+    char property[PROP_VALUE_MAX] = {0};
+    const char *value = getenv("RECOMP_VK_DESCRIPTOR_CONTENTS");
+    if (!value && __system_property_get("debug.nfsu.descriptor_contents", property) > 0)
+        value = property;
+    if (value && !strcmp(value, "2")) return 2; /* Count matches, keep original calls. */
     return !value || !*value || !strcmp(value, "1");
 }
 #endif
@@ -3225,6 +3236,10 @@ static int ready(void)
     s_android_descriptor_reuse = reuse_requested && !s_android_dynamic_descriptors && !s_android_native_push;
     NFS_LOG_INFO("graphics", "[VKSET] requested=%d active=%d (startup only)\n",
         reuse_requested, s_android_descriptor_reuse);
+    int contents_requested = android_descriptor_contents_requested();
+    s_android_descriptor_contents = s_android_descriptor_reuse ? contents_requested : 0;
+    NFS_LOG_INFO("graphics", "[VKCONT] requested=%d active=%d (startup only)\n",
+        contents_requested, s_android_descriptor_contents);
     p_begin_rendering = android_begin_rendering;
     p_end_rendering = android_end_rendering;
 #else

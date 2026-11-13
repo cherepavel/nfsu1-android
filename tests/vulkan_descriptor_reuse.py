@@ -24,7 +24,7 @@ end = android.index("static void VKAPI_PTR android_begin_rendering", start)
 (args.output_dir / "descriptor_reset_under_test.h").write_text(android[start:end])
 source = (root / "xboxrecomp/src/nv2a_vk/nv2a_vk.c").read_text()
 start = source.index("static int android_descriptor_reuse_requested(void)")
-end = source.index("\n#endif", start)
+end = source.index("static int android_descriptor_contents_requested(void)", start)
 (args.output_dir / "descriptor_selector_under_test.h").write_text(source[start:end])
 binary = args.output_dir / ("descriptor-reuse-gpu" if args.gpu else "descriptor-reuse")
 command = shlex.split(args.cc) + ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",

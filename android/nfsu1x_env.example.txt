@@ -38,6 +38,9 @@ RECOMP_QUIET=1
 # Skip unused trace peaks and reduce mix-bin peaks with NEON: default 1.
 # Set 0 for the original diagnostic scans. Fully restart after editing.
 # RECOMP_APU_PEAK_OPT=0
+# Skip consecutive identical ordinary Vulkan descriptor updates/binds: default 1.
+# Set 0 for previous calls, or 2 to count matches without skipping; restart.
+# RECOMP_VK_DESCRIPTOR_CONTENTS=0
 # Adaptive screen aspect + FOV; proportional racing HUD, stretched menus.
 # Default on. Set 0 for the previous presentation; restart after editing.
 # RECOMP_ADAPTIVE_WIDESCREEN=0
