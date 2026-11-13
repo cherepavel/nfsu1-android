@@ -40,6 +40,10 @@ than requiring users to reproduce the investigation's device properties.
 | CPU performance counters | Off in ordinary play | debug.nfsu.perf=1, next process |
 | Detailed diagnostics | Off | debug.nfsu.diagnostics=1, next process |
 
+The Android `xbox_devbus` helper library is also compiled at `-O2`, matching
+the kernel's existing optimization policy. This is a build setting with no
+runtime property; validation is in [the device-bus report](android-devbus-o2.md).
+
 Detailed diagnostics enables CPU counters when perf is unset/empty; explicit
 perf=0 still disables them. Startup executor and profiling overrides accept
 exact 1; explicit 0 and invalid nonempty values select off. Clearing these

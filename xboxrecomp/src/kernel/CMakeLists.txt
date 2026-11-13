@@ -47,6 +47,11 @@ endif()
 # arena's bus range. Its own library so xbox_apu and xbox_usb can link it
 # without the bridge (see xbox_devbus.c).
 add_library(xbox_devbus STATIC xbox_devbus.c)
+if(ANDROID)
+    # APU physical-address checks are hot; this separate target otherwise
+    # misses xbox_kernel's -O2 and is built at O0 in Android Debug.
+    target_compile_options(xbox_devbus PRIVATE -O2)
+endif()
 target_include_directories(xbox_devbus PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(xbox_devbus PUBLIC platform)
 target_link_libraries(xbox_kernel PUBLIC xbox_devbus)
