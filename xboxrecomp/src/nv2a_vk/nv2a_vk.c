@@ -102,6 +102,7 @@ static const uint32_t *s_regs;
 static const Nv2aRawBatch *s_batch;
 
 /* Hitch accounting, as in nv2a_gl. */
+static int s_hitch_timing = 1;
 static uint32_t s_hz_progs, s_hz_texs, s_hz_draws;
 static uint64_t s_hz_prog_ns, s_hz_tex_ns, s_hz_tex_bytes;
 static uint64_t hz_now(void)
@@ -1887,9 +1888,9 @@ static void bind_stage(const uint32_t *regs, int i, float scale[2], VkDescriptor
                 dyn_cube = 1;
             } else {
                 uint32_t texs = s_hz_texs;
-                uint64_t t0 = hz_now();
+                uint64_t t0 = s_hitch_timing ? hz_now() : 0;
                 out->imageView = tex_get(va, color, w, h, 0, face, levels);
-                if (s_hz_texs != texs)
+                if (t0 && s_hz_texs != texs)
                     s_hz_tex_ns += hz_now() - t0;
             }
         }
@@ -1900,9 +1901,9 @@ static void bind_stage(const uint32_t *regs, int i, float scale[2], VkDescriptor
         rt_scale(w, h, rt->w, rt->h, rt->aa_sx, rt->aa_sy, scale);
     } else {
         uint32_t texs = s_hz_texs;
-        uint64_t t0 = hz_now();
+        uint64_t t0 = s_hitch_timing ? hz_now() : 0;
         out->imageView = tex_get(va, color, w, h, pitch, 0, levels);
-        if (s_hz_texs != texs)
+        if (t0 && s_hz_texs != texs)
             s_hz_tex_ns += hz_now() - t0;
     }
     addr = regs[base + 2];
@@ -2971,6 +2972,10 @@ static int ready(void)
         return s_state > 0;
     s_state = -1;
     s_trace = getenv("RECOMP_GL_TRACE") != NULL;
+#ifdef NFSU_USE_ZLOG
+    /* The Android log level is configured before the renderer starts. */
+    s_hitch_timing = nfs_log_enabled("graphics", NFS_LOG_LEVEL_DEBUG);
+#endif
     {
         const char *e = getenv("RECOMP_VK_TRACE");
         s_vtrace = e ? atoi(e) : 0;
@@ -4215,9 +4220,9 @@ static void vk_draw_raw_impl(const Nv2aRawBatch *b)
     psh_key(r, &pk);
     {
         uint32_t made = s_prog_made;
-        uint64_t t0 = hz_now();
+        uint64_t t0 = s_hitch_timing ? hz_now() : 0;
         p = prog_get(b, &pk);
-        if (s_prog_made != made) {
+        if (t0 && s_prog_made != made) {
             s_hz_progs += s_prog_made - made;
             s_hz_prog_ns += hz_now() - t0;
         }

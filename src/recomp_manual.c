@@ -23,6 +23,7 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stddef.h>
 #include <string.h>
 #include <stdlib.h>
@@ -786,6 +787,7 @@ static int s_blur = 1;                  /* native blur enabled by default */
 static uint32_t s_bloom_saved;
 static int s_bloom_overridden;
 static int s_fps60;                     /* experimental; default 30 FPS */
+static atomic_uint s_present_vblanks;  /* 0 until the race renderer starts */
 static int s_refl = 1;                  /* 0 off, 1 on */
 static int s_scale_idx = 1;             /* into s_scale_pct: 1.5x */
 static int s_scale_saved;               /* nfsu1x_options.txt had scale= */
@@ -830,9 +832,22 @@ static const char *const s_aniso_texts[] = { "Off", "2x", "4x", "8x", "16x" };
 #endif
 static const char *const s_fps_texts[] = { "30 FPS", "60 FPS" };
 
+/* The three D3D loads that encode normal flip timing call this helper.
+ * Temporary D3D modes, such as immediate and four-vblank flips, pass through. */
+uint32_t nfsu1_present_interval(uint32_t interval)
+{
+    unsigned vblanks = atomic_load_explicit(&s_present_vblanks, memory_order_relaxed);
+    uint32_t count = interval & 0x7FFFFFFFu;
+
+    if (vblanks && (count == 1 || count == 2))
+        return (interval & 0x80000000u) | vblanks;
+    return interval;
+}
+
 static void frame_rate_changed(void)
 {
-    /* Applied by the race render wrapper on the next frame. */
+    if (atomic_load_explicit(&s_present_vblanks, memory_order_relaxed))
+        atomic_store_explicit(&s_present_vblanks, s_fps60 ? 1u : 2u, memory_order_relaxed);
 }
 
 static const OptRow s_rows[] = {
@@ -844,7 +859,7 @@ static const OptRow s_rows[] = {
     { "Square Pixels:", s_onoff, 2, &s_square, picture_changed },
 #endif
     { "Frame Rate:", s_fps_texts, 2, &s_fps60, frame_rate_changed },
-    { "Blur/Bloom:", s_onoff, 2, &s_blur, frame_rate_changed },
+    { "Blur/Bloom:", s_onoff, 2, &s_blur, NULL },
 };
 #define N_ROWS ((int)(sizeof s_rows / sizeof s_rows[0]))
 
@@ -1347,7 +1362,8 @@ static void opt_row_input(int i)
 
     if (msg == FE_PAD_LEFT || msg == FE_PAD_RIGHT) {
         *o->value = (*o->value + (msg == FE_PAD_RIGHT ? 1 : o->n - 1)) % o->n;
-        o->changed();
+        if (o->changed)
+            o->changed();
         options_save();
         options_log();
         opt_row_text(screen, i);
@@ -1414,18 +1430,9 @@ void sub_00016050(void)
         MEM32(0x0021C0B4u) = 0;
     }
 
-    /* NFSU1 XDK presentation interval (0x1DE94C): initialization in
-     * sub_000156F0 requests 0x80000002, and D3D uses the low bits as
-     * the vblank count per flip. Keep its immediate-when-late flag and
-     * change only the normal one/two-vblank intervals. Do not alter the
-     * 60 Hz kernel clock, simulation time, or special D3D intervals.
-     * Reapply at each race render so device resets cannot lose the option. */
-    {
-        uint32_t interval = MEM32(0x001DE94Cu);
-        uint32_t count = interval & 0x7FFFFFFFu;
-        if (count == 1 || count == 2)
-            MEM32(0x001DE94Cu) = (interval & 0x80000000u) | (s_fps60 ? 1u : 2u);
-    }
+    /* Start applying the saved cadence at the first race render. */
+    if (!atomic_load_explicit(&s_present_vblanks, memory_order_relaxed))
+        atomic_store_explicit(&s_present_vblanks, s_fps60 ? 1u : 2u, memory_order_relaxed);
 
     if (s_refl) {
         sub_00016050_gen();

@@ -36,4 +36,5 @@ mkdir -p "$GEN"
 rm -f "$GEN/recomp_types.h"
 python3 -m tools.recomp "$XBE" --game-name "NFS Underground" --all --split 250 \
     --gen-dir "$GEN" --exclude-manual "$HERE/src/recomp_manual.c" \
-    --mmio-sections DSOUND,XPP
+    --mmio-sections DSOUND,XPP \
+    --load32-hooks "$HERE/config/present_interval_loads.json"

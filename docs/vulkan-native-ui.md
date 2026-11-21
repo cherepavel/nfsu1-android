@@ -4,6 +4,7 @@ Prepared on 28 October 2026. This is an opt-in prototype; device performance
 and image quality have not yet been checked. No APK build or installation was
 performed by the agent.
 
+
 The game's menu/HUD draws currently share the scaled scene color target.
 Original low-resolution UI textures do not gain source detail from a larger
 target, although rasterization, text edges and filtering can still change.
