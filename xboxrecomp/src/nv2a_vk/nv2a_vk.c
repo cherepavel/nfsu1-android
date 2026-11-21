@@ -610,15 +610,23 @@ static VkSurf    *s_last;
 static int         s_in_render;
 static VkSurf     *s_rt;
 static VkDepthBuf *s_rt_depth;
+static VkRect2D    s_sc_cur;            /* scissor set in this pass */
+static void pend_flush(void);
 
 #ifdef __ANDROID__
+static int s_reflection_instance_mode, s_main_instance_mode;
 #include "nv2a_vk_unused_depth.h"
+#include "nv2a_vk_draw_audit.h"
 #endif
 #include "nv2a_vk_barrier.h"
 
 static void end_rendering_at(const char *reason)
 {
     if (s_in_render) {
+#ifdef __ANDROID__
+        if (s_reflection_instance_mode == 1 || s_main_instance_mode == 1) pend_flush();
+        if (s_draw_audit) s_draw_audit_span++;
+#endif
         p_end_rendering(s_cb);
         if (s_f->gpu_queries && s_f->gpu_active_pass >= 0) {
             s_f->gpu_targets[s_f->gpu_active_pass].end_reason = reason;
@@ -630,8 +638,6 @@ static void end_rendering_at(const char *reason)
     }
 }
 #define end_rendering() end_rendering_at(__func__)
-
-static VkRect2D s_sc_cur;               /* scissor set in this pass */
 
 static void set_viewport(uint32_t pw, uint32_t ph)
 {
@@ -776,7 +782,6 @@ static int make_image(uint32_t w, uint32_t h, VkFormat fmt, VkImageUsageFlags us
 
 static void native_ui_drop(VkSurf *s);
 static void native_ui_restore(VkSurf *s, int discard);
-static void pend_flush(void);
 
 static VkSurf *surf_find(uint32_t va)
 {
@@ -970,9 +975,7 @@ static VkSurf *target(const Nv2aSurface *sf, uint32_t zeta_va, VkDepthBuf **dout
 
 /* ── Textures ─────────────────────────────────────────────────────── */
 
-#ifdef __ANDROID__
 #include "nv2a_vk_texture_hash.h"
-#endif
 typedef struct {
     uint32_t va, color, w, h, pitch, hash, bytes;
     uint32_t face;              /* cube map: bytes per face; 0 = 2D */
@@ -1094,8 +1097,7 @@ static uint32_t bytes_hash(uint32_t va, uint32_t bytes)
         memcpy(&w, mem + i, 4);
         h = (h ^ w) * 16777619u;
     }
-    memcpy(&i, mem + bytes - 4, 4);
-    return (h ^ i) * 16777619u;
+    return (h ^ nv2a_vk_texture_hash_tail(mem, bytes)) * 16777619u;
 }
 
 static uint32_t tex_bytes(uint32_t color, uint32_t w, uint32_t h, uint32_t pitch)
@@ -1104,6 +1106,13 @@ static uint32_t tex_bytes(uint32_t color, uint32_t w, uint32_t h, uint32_t pitch
     if (color == 0x0E || color == 0x0F) return ((w + 3) / 4) * ((h + 3) / 4) * 16;
     if (pitch) return pitch * h;
     return w * h * 4;
+}
+
+static uint32_t indexed_palette_entries(void)
+{
+    if (!(s_palette_reg & ~0x3Fu))
+        return 0;
+    return 256u >> ((s_palette_reg >> 2) & 3);
 }
 
 static uint32_t swizzle_index(uint32_t u, uint32_t v, uint32_t w, uint32_t h)
@@ -1157,7 +1166,7 @@ static int indexed_tiles_enabled(void)
 static int decode_indexed(uint32_t va, uint32_t w, uint32_t h, uint32_t *out)
 {
     const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
-    uint32_t entries = 256u >> ((s_palette_reg >> 2) & 3);
+    uint32_t entries = indexed_palette_entries();
     const uint8_t *idx = mem + va;
     uint32_t x, y;
     uint32_t pal[256];
@@ -1165,7 +1174,7 @@ static int decode_indexed(uint32_t va, uint32_t w, uint32_t h, uint32_t *out)
     int tiles = indexed_tiles_enabled();
     if (tiles) s_indexed_stats.calls++;
 #endif
-    if (!(s_palette_reg & ~0x3Fu)) {
+    if (!entries) {
 #ifdef __ANDROID__
         if (tiles) s_indexed_stats.invalid++;
 #endif
@@ -1491,8 +1500,13 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h, 
         return t->view;
     }
     uint64_t perf_hash = nfsu_perf_begin();
-#ifdef __ANDROID__
     uint32_t bytes = face ? face * 6 : tex_bytes(color, w, h, pitch);
+    /* P8 decoding consumes one byte per index. Four bytes per pixel is the
+     * size of the decoded Vulkan image, not the guest 2D texture. */
+    if (color == 0x0B && !face)
+        bytes = w * h;
+    uint32_t palette_bytes = color == 0x0B ? indexed_palette_entries() * 4u : 0;
+#ifdef __ANDROID__
     int snapshot_on = texture_snapshot_enabled();
     if (snapshot_on && (bytes < NV2A_VK_SNAPSHOT_MIN_BYTES || bytes > NV2A_VK_SNAPSHOT_MAX_BYTES)) {
         s_texture_snapshot_stats.skipped++;
@@ -1500,13 +1514,14 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h, 
     }
     if (snapshot_on) {
         const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
-        int paletted = color == 0x0B;
         VkTextureHashSnapshot *previous = t ? t->snapshot : NULL;
         if (previous) {
             s_texture_snapshot_stats.checks++;
-            if (previous->hash == t->hash && previous->bytes == bytes && previous->paletted == (uint32_t)paletted
+            if (previous->hash == t->hash && previous->bytes == bytes
+                && previous->palette_bytes == palette_bytes
                 && nv2a_vk_texture_hash_matches(mem + va, bytes, previous->data)
-                && (!paletted || nv2a_vk_texture_hash_matches(mem + s_palette_va, 1024, previous->palette))) {
+                && (!palette_bytes || nv2a_vk_texture_hash_matches(mem + s_palette_va,
+                    palette_bytes, previous->palette))) {
                 s_texture_snapshot_stats.hits++;
                 t->used = t->checked = s_frame;
                 tex_perf_end(NFSU_PERF_TEX_HASH, perf_hash);
@@ -1515,17 +1530,18 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h, 
         }
         s_texture_snapshot_stats.captures++;
         s_texture_snapshot_pending.bytes = bytes;
-        s_texture_snapshot_pending.paletted = paletted;
+        s_texture_snapshot_pending.palette_bytes = palette_bytes;
         hash = nv2a_vk_texture_hash_capture(mem + va, bytes, s_texture_snapshot_pending.data);
-        if (paletted)
-            hash ^= nv2a_vk_texture_hash_capture(mem + s_palette_va, 1024, s_texture_snapshot_pending.palette) * 31u;
+        if (palette_bytes)
+            hash ^= nv2a_vk_texture_hash_capture(mem + s_palette_va, palette_bytes,
+                s_texture_snapshot_pending.palette) * 31u;
         s_texture_snapshot_pending.hash = hash;
     } else
 #endif
     {
-        hash = bytes_hash(va, face ? face * 6 : tex_bytes(color, w, h, pitch));
-        if (color == 0x0B)
-            hash ^= bytes_hash(s_palette_va, 1024) * 31u;
+        hash = bytes_hash(va, bytes);
+        if (palette_bytes)
+            hash ^= bytes_hash(s_palette_va, palette_bytes) * 31u;
     }
     tex_perf_end(NFSU_PERF_TEX_HASH, perf_hash);
     if (t && t->hash == hash) {
@@ -1623,6 +1639,12 @@ static VkImageView cube_from_surfaces(uint32_t va, uint32_t w, uint32_t h, uint3
     uint32_t f, size = 0, cube_query = UINT32_MAX;
     int i, copied = 0;
 
+#ifdef __ANDROID__
+    if (s_draw_audit)
+        for (f = 0; f < 6; f++)
+            if (faces[f])
+                fprintf(s_draw_audit, "face\t%08x\t%u\t%08x\n", va, f, faces[f]->va);
+#endif
     for (f = 0; f < 6; f++)
         if (faces[f] && to_stored(w, faces[f]->pw, faces[f]->w) > size)
             size = to_stored(w, faces[f]->pw, faces[f]->w);
@@ -3813,7 +3835,30 @@ static int upload_vertices(const Nv2aRawBatch *b)
 #ifdef __ANDROID__
     cache_mode = vertex_cache_mode();
     cache_eligible = vertex_cache_lookup(b, direct, conv, bytes, cache_mode, &lookup);
+    if (s_draw_audit) {
+        s_draw_audit_copied = 0;
+        s_draw_audit_vertices = 0;
+        s_draw_audit_direct_only = !conv;
+        for (i = 0; i < nrun; i++)
+            s_draw_audit_copied += (size_t)(run[i].hi - run[i].lo);
+        if (nrun) {
+            const uint32_t shape[] = { nv, direct };
+            uint64_t hash = draw_audit_hash(14695981039346656037ull, shape, sizeof shape);
+            for (i = 0; i < nrun; i++)
+                hash = draw_audit_hash(hash, run[i].lo, (size_t)(run[i].hi - run[i].lo));
+            for (a = 0; a < NV2A_RAW_ATTRS; a++) {
+                if (!(direct & (1u << a))) continue;
+                const uint64_t attr[] = {
+                    (uint32_t)of_run[a], b->direct[a].ptr - run[of_run[a]].lo,
+                    b->direct[a].stride, fmt[a]
+                };
+                hash = draw_audit_hash(hash, attr, sizeof attr);
+            }
+            s_draw_audit_vertices = hash;
+        }
+    }
     if (cache_eligible && lookup.hit && cache_mode == 1) {
+        if (s_draw_audit) s_draw_audit_copied = 0;
         vertex_cache_reuse(&lookup);
         return 1;
     }
@@ -3973,26 +4018,48 @@ static uint32_t s_st_reg_scans;
 /* Did a register a draw depends on change since the last draw? */
 static int regs_changed(const uint32_t *r)
 {
+    /* NOP, BEGIN_END, draw data, semaphore and load slots. */
+#define REG_WORD_BIT(method) (1u << (((method) % 64u) / 4u))
+    static const uint16_t ignored_words[0x2000 / 64] = {
+        [0x0100 / 64] = REG_WORD_BIT(0x0100),
+        [0x17FC / 64] = REG_WORD_BIT(0x17FC),
+        [0x1800 / 64] = 0x00FFu,
+        [0x1D6C / 64] = REG_WORD_BIT(0x1D6C) | REG_WORD_BIT(0x1D70),
+        [0x1E9C / 64] = REG_WORD_BIT(0x1E9C) | REG_WORD_BIT(0x1EA4),
+    };
+#undef REG_WORD_BIT
     uint8_t *dirty = nv2a_pb_reg_dirty();
-    uint32_t blk, w;
     int changed = 0;
     s_st_reg_scans++;
 
-    for (blk = 0; blk < 0x2000 / 64; blk++) {
-        if (!dirty[blk])
-            continue;
-        dirty[blk] = 0;
-        if (blk >= 0xB00 / 64 && blk < 0xC00 / 64)
-            continue;                           /* program / constant uploads */
-        for (w = blk * 16; w < blk * 16 + 16; w++) {
-            uint32_t m = w * 4;
-            if (r[w] == s_regs_seen[w])
-                continue;
-            s_regs_seen[w] = r[w];
-            if (m == 0x0100 || m == 0x17FC || (m >= 0x1800 && m < 0x1820)
-             || m == 0x1D6C || m == 0x1D70 || m == 0x1E9C || m == 0x1EA4)
-                continue;                       /* NOP, BEGIN_END, draw data, semaphore, load slots */
-            changed = 1;
+    for (uint32_t first = 0; first < sizeof ignored_words / sizeof ignored_words[0]; first += 8) {
+        uint64_t group;
+        memcpy(&group, dirty + first, sizeof group);
+        if (!group) continue;
+
+        for (uint32_t blk = first; blk < first + 8; blk++) {
+            if (!dirty[blk]) continue;
+            dirty[blk] = 0;
+            if (blk >= 0xB00 / 64 && blk < 0xC00 / 64)
+                continue;                       /* program / constant uploads */
+
+            const uint32_t *current = r + blk * 16;
+            uint32_t *previous = s_regs_seen + blk * 16;
+            if (!changed) {
+                uint16_t ignored = ignored_words[blk];
+                if (!ignored) {
+                    changed = memcmp(current, previous, 64) != 0;
+                } else {
+                    for (uint32_t w = 0; w < 16; w++) {
+                        if (!(ignored & (1u << w)) && current[w] != previous[w]) {
+                            changed = 1;
+                            break;
+                        }
+                    }
+                }
+            }
+            /* Refresh every dirty block even after finding a difference. */
+            memcpy(previous, current, 64);
         }
     }
     return changed;
@@ -4010,12 +4077,82 @@ static struct {
     uint32_t     tex_va[4], pal_va[4];
     float        aa_sx, aa_sy;
     Nv2aSurface  surface;
+#ifdef __ANDROID__
+    unsigned     scene_scope;
+    uint32_t     scene_ring_gen, scene_fp_mode;
+    float        scene_composite[16], scene_vp_offset[4];
+#endif
     struct { const uint8_t *ptr; uint32_t type, size, stride; } direct[NV2A_RAW_ATTRS];
     uint32_t    *idx;
     size_t       idx_cap;
 } s_pend;
 static int s_inst_on = -1, s_inst_alt;
 static uint32_t s_st_draws, s_st_calls, s_st_inst, s_st_creuse;
+
+#ifdef __ANDROID__
+enum { INSTANCE_REFLECTION = 1, INSTANCE_MAIN };
+static struct {
+    uint64_t draws, appended, indices;
+} s_scene_instances[INSTANCE_MAIN + 1];
+
+static int reflection_instance_face(const Nv2aRawBatch *b)
+{
+    if (!nv2a_vk_cube_maps || b->surface.clip_x || b->surface.clip_y)
+        return 0;
+    for (unsigned i = 0; i < VK_MAX_CUBE; i++) {
+        const VkCube *c = &s_cube[i];
+        if (!c->image || !c->sampled || s_frame - c->sampled_frame > 1 ||
+            !c->face || b->color_va < c->va ||
+            b->surface.width != c->w || b->surface.height != c->h)
+            continue;
+        uint32_t delta = b->color_va - c->va;
+        if (delta / c->face < 6 && delta % c->face == 0)
+            return 1;
+    }
+    return 0;
+}
+
+static int main_instance_surface(const Nv2aRawBatch *b)
+{
+    /* Both alternating color buffers become recent flip sources. Limit this
+     * trial to depth-tested vertex-program draws, outside the native UI. */
+    if (b->xform != 2 || !b->zeta_va || !b->regs[0x30C / 4] || s_native_ui_phase)
+        return 0;
+    const VkSurf *s = s_rt && s_rt->va == b->color_va ? s_rt : surf_find(b->color_va);
+    return s && s->screen_seen && s_frame - s->screen_frame <= 4u
+        && !s_native_ui[s - s_surf].active;
+}
+
+static void scene_instance_report(unsigned scope, const char *tag, const char *name, int *mode)
+{
+    if (*mode) {
+        NFS_LOG_INFO("performance", "[%s] frame=%u mode=%d draws=%llu calls=%llu appended=%llu indices=%llu\n",
+            tag, s_frame, *mode, (unsigned long long)s_scene_instances[scope].draws,
+            (unsigned long long)(s_scene_instances[scope].draws - s_scene_instances[scope].appended),
+            (unsigned long long)s_scene_instances[scope].appended,
+            (unsigned long long)s_scene_instances[scope].indices);
+        memset(&s_scene_instances[scope], 0, sizeof s_scene_instances[scope]);
+    }
+    char property[PROP_VALUE_MAX] = {0};
+    __system_property_get(name, property);
+    /* Mode 2 counts the original draws for a live control. */
+    int next = !strcmp(property, "1") ? 1 : !strcmp(property, "2") ? 2 : 0;
+    if (next != *mode) {
+        *mode = next;
+        NFS_LOG_INFO("graphics", "[%s] next_mode=%d frame=%u\n", tag, next, s_frame);
+    }
+}
+
+static void scene_instance_flip(void)
+{
+    if (s_frame % 120)
+        return;
+    scene_instance_report(INSTANCE_REFLECTION, "VKREFLINST", "debug.nfsu.reflection_instancing",
+                          &s_reflection_instance_mode);
+    scene_instance_report(INSTANCE_MAIN, "VKMAININST", "debug.nfsu.main_instancing",
+                          &s_main_instance_mode);
+}
+#endif
 
 static void gpu_count_draw(uint32_t indices, uint32_t instances, int eligible, int selected)
 {
@@ -4065,10 +4202,10 @@ static int pend_matches(const Nv2aRawBatch *b)
 }
 
 /* Can b be held as the first instance of a run? */
-static int pend_eligible(const Nv2aRawBatch *b)
+static int pend_eligible(const Nv2aRawBatch *b, int enabled)
 {
     uint32_t a;
-    if (!s_inst_on || b->xform != 2 || (b->attr_present & ~b->attr_direct))
+    if (!enabled || b->xform != 2 || (b->attr_present & ~b->attr_direct))
         return 0;
     for (a = 0; a < NV2A_RAW_ATTRS; a++)
         if ((b->attr_direct & (1u << a))
@@ -4078,7 +4215,7 @@ static int pend_eligible(const Nv2aRawBatch *b)
 }
 
 static void pend_hold(const Nv2aRawBatch *b, uint32_t n, VkDeviceSize cat, uint32_t max,
-                      int compact_eligible, int compact_selected)
+                      int compact_eligible, int compact_selected, unsigned scene_scope)
 {
     uint32_t a;
     s_pend.on = 1;
@@ -4103,6 +4240,17 @@ static void pend_hold(const Nv2aRawBatch *b, uint32_t n, VkDeviceSize cat, uint3
     s_pend.aa_sx = b->aa_sx;
     s_pend.aa_sy = b->aa_sy;
     s_pend.surface = b->surface;
+#ifdef __ANDROID__
+    s_pend.scene_scope = scene_scope;
+    if (scene_scope) {
+        s_pend.scene_ring_gen = s_ring_gen;
+        s_pend.scene_fp_mode = uniform_fp_mode();
+        memcpy(s_pend.scene_composite, b->composite, sizeof b->composite);
+        memcpy(s_pend.scene_vp_offset, b->vp_offset, sizeof b->vp_offset);
+    }
+#else
+    (void)scene_scope;
+#endif
     memcpy(s_pend.tex_va, b->tex_va, sizeof s_pend.tex_va);
     memcpy(s_pend.pal_va, b->pal_va, sizeof s_pend.pal_va);
     for (a = 0; a < NV2A_RAW_ATTRS; a++) {
@@ -4128,7 +4276,7 @@ static void pend_hold(const Nv2aRawBatch *b, uint32_t n, VkDeviceSize cat, uint3
 }
 
 /* One more instance of the held draw, when b is one; 0: draw it normally. */
-static int pend_append(const Nv2aRawBatch *b, int changed)
+static int pend_append(const Nv2aRawBatch *b, int changed, unsigned scene_scope)
 {
     VkDeviceSize at;
     void *map;
@@ -4137,6 +4285,18 @@ static int pend_append(const Nv2aRawBatch *b, int changed)
         return 0;
     if (changed || s_pend.count >= s_pend.max || s_pend.cb_gen != s_cb_gen || !pend_matches(b))
         return 0;
+#ifdef __ANDROID__
+    if (s_pend.scene_scope != scene_scope)
+        return 0;
+    if (scene_scope && (!s_in_render || !s_rt || s_rt->va != b->color_va
+        || s_pend.scene_ring_gen != s_ring_gen
+        || s_pend.scene_fp_mode != uniform_fp_mode()
+        || memcmp(s_pend.scene_composite, b->composite, sizeof b->composite)
+        || memcmp(s_pend.scene_vp_offset, b->vp_offset, sizeof b->vp_offset)))
+        return 0;
+#else
+    (void)scene_scope;
+#endif
     at = (s_f->ring_off + s_ubo_align - 1) & ~(s_ubo_align - 1);
     if (at != s_pend.cat + (VkDeviceSize)s_pend.count * VK_CONST_SIZE
      || at + VK_CONST_SIZE > RING_BYTES)
@@ -4147,6 +4307,14 @@ static int pend_append(const Nv2aRawBatch *b, int changed)
     memcpy(map, b->vp_consts, VK_CONST_SIZE);
     s_pend.count++;
     s_st_inst++;
+#ifdef __ANDROID__
+    if (scene_scope) {
+        s_rt->gen++;
+        s_scene_instances[scene_scope].draws++;
+        s_scene_instances[scene_scope].appended++;
+        s_scene_instances[scene_scope].indices += s_pend.n;
+    }
+#endif
     return 1;
 }
 
@@ -4190,13 +4358,32 @@ static void vk_draw_raw_impl(const Nv2aRawBatch *b)
                 s_inst_on ? "on" : "off", s_ubo_range, (unsigned)s_ubo_align);
     }
     s_st_draws++;
+    unsigned scene_scope = 0;
+    int instance = s_inst_on;
+#ifdef __ANDROID__
+    unsigned measured_scope = 0;
+    int mode = 0;
+    if (!instance) {
+        if (s_reflection_instance_mode && reflection_instance_face(b)) {
+            measured_scope = INSTANCE_REFLECTION;
+            mode = s_reflection_instance_mode;
+        } else if (s_main_instance_mode && main_instance_surface(b)) {
+            measured_scope = INSTANCE_MAIN;
+            mode = s_main_instance_mode;
+        }
+    }
+    if (mode == 1 && s_ubo_range >= 2 * VK_CONST_SIZE && VK_CONST_SIZE % s_ubo_align == 0) {
+        scene_scope = measured_scope;
+        instance = 1;
+    }
+#endif
     /* The register shadow is used only to validate an instanced append.
      * With instancing disabled no consumer needs it. Dirty bits accumulate;
      * the next enabled draw refreshes the shadow before it can hold a run.
      * This also preserves the every-other-frame diagnostic mode. */
-    if (s_inst_on) {
+    if (instance) {
         int changed = regs_changed(r);
-        if (pend_append(b, changed))
+        if (pend_append(b, changed, scene_scope))
             return;
     }
     pend_flush();
@@ -4239,6 +4426,16 @@ static void vk_draw_raw_impl(const Nv2aRawBatch *b)
     /* Textures first: uploads end the rendering pass. */
     for (i = 0; i < 4; i++)
         bind_stage(r, (int)i, tscale[i], &img[i], &sampled[i]);
+#ifdef __ANDROID__
+    /* Keep draws that sample rendered surfaces or cube maps on the original
+     * path. Those bindings can inspect surface generations and end a pass. */
+    if (scene_scope)
+        for (i = 0; i < 4; i++)
+            if (sampled[i] || ((r[0x1E70 / 4] >> (5 * i)) & 0x1F) == 3) {
+                instance = 0;
+                break;
+            }
+#endif
     for (i = 0; i < 4; i++)
         if (sampled[i] && sampled[i]->dirty && sampled[i] != s) {
             end_rendering();                 /* next begin_rendering barriers */
@@ -4378,6 +4575,7 @@ static void vk_draw_raw_impl(const Nv2aRawBatch *b)
         }
     }
 #endif
+    int eligible = pend_eligible(b, instance);
     {
         /* Constants last: repeats append theirs right behind (pend_append).
          * A draw that cannot start an instanced run, with the constants of
@@ -4389,7 +4587,6 @@ static void vk_draw_raw_impl(const Nv2aRawBatch *b)
         static VkDeviceSize last_at;
         static uint32_t last_gen, last_ring_gen;
         VkDeviceSize cat, range;
-        int eligible = pend_eligible(b);
         if (reuse_on < 0) {
             const char *e = getenv("RECOMP_VK_CONST_REUSE");
             reuse_on = !(e && *e == '0');
@@ -4431,11 +4628,20 @@ static void vk_draw_raw_impl(const Nv2aRawBatch *b)
     p_push_desc(s_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, s_layout, 0, 7, wr);
 
     VT("  vkCmdDrawIndexed %u\n", n);
+#ifdef __ANDROID__
+    if (measured_scope) {
+        s_scene_instances[measured_scope].draws++;
+        s_scene_instances[measured_scope].indices += n;
+    }
+#endif
     /* The constants were the ring's last allocation, so a repeat's set
      * lands right behind them (pend_append). */
-    if (pend_eligible(b) && inst_room > 1) {
-        pend_hold(b, n, ub[2].offset, inst_room, compact_eligible, compact_selected);
+    if (eligible && inst_room > 1) {
+        pend_hold(b, n, ub[2].offset, inst_room, compact_eligible, compact_selected, scene_scope);
     } else {
+#ifdef __ANDROID__
+        if (s_draw_audit) draw_audit_record(b, s, pipe, img, ub, n);
+#endif
         gpu_count_draw(n, 1, compact_eligible, compact_selected);
         vkCmdDrawIndexed(s_cb, n, 1, 0, 0, 0);
         s_st_calls++;
@@ -4518,6 +4724,9 @@ static void vk_clear(const Nv2aSurface *sf, const Nv2aRenderState *rs,
     VT("clear %08X %ux%u flags %X rect %d,%d %ux%u depth %p\n", s->va, s->pw, s->ph, flags,
        rect.rect.offset.x, rect.rect.offset.y, rect.rect.extent.width, rect.rect.extent.height, (void *)d);
     begin_rendering(s, d);
+#ifdef __ANDROID__
+    if (s_draw_audit) s_draw_audit_span++;
+#endif
     vkCmdClearAttachments(s_cb, nca, ca, 1, &rect);
     if (s_f->gpu_queries && s_f->gpu_active_pass >= 0)
         s_f->gpu_targets[s_f->gpu_active_pass].clears++;
@@ -4907,6 +5116,10 @@ static void vk_flip_impl(void)
     pend_flush();
     s_native_ui_phase = 0; /* also recover from a skipped closing marker */
     s_frame++;
+#ifdef __ANDROID__
+    scene_instance_flip();
+    draw_audit_flip(s_frame, s_inst_on || s_reflection_instance_mode == 1 || s_main_instance_mode == 1);
+#endif
     if (s_frame % 300 == 0) {
         pool_report();
 #ifdef __ANDROID__
