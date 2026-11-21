@@ -9,10 +9,20 @@
 #define NV2A_VK_SNAPSHOT_MIN_BYTES 1024
 #define NV2A_VK_SNAPSHOT_MAX_BYTES 4096
 typedef struct {
-    uint32_t bytes, paletted, hash;
+    uint32_t bytes, palette_bytes, hash;
     uint32_t data[NV2A_VK_HASH_SAMPLES];
     uint32_t palette[NV2A_VK_PALETTE_SAMPLES];
 } VkTextureHashSnapshot;
+
+static inline uint32_t nv2a_vk_texture_hash_tail(const uint8_t *mem, uint32_t bytes)
+{
+    uint32_t word = 0;
+    if (bytes < sizeof word)
+        memcpy(&word, mem, bytes);
+    else
+        memcpy(&word, mem + bytes - sizeof word, sizeof word);
+    return word;
+}
 
 static inline uint32_t nv2a_vk_texture_hash_capture(const uint8_t *mem,
     uint32_t bytes, uint32_t *samples)
@@ -28,8 +38,7 @@ static inline uint32_t nv2a_vk_texture_hash_capture(const uint8_t *mem,
         samples[at++] = word;
         hash = (hash ^ word) * 16777619u;
     }
-    uint32_t last;
-    memcpy(&last, mem + bytes - 4, 4);
+    uint32_t last = nv2a_vk_texture_hash_tail(mem, bytes);
     samples[at] = last;
     return (hash ^ last) * 16777619u;
 }
@@ -63,8 +72,7 @@ static inline int nv2a_vk_texture_hash_matches(const uint8_t *mem, uint32_t byte
             memcpy(&word, mem + i, 4); d0 |= word ^ samples[at];
         }
     }
-    uint32_t last;
-    memcpy(&last, mem + bytes - 4, 4);
+    uint32_t last = nv2a_vk_texture_hash_tail(mem, bytes);
     return !(d0 | d1 | d2 | d3 | (last ^ samples[at]));
 }
 

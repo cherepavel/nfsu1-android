@@ -25,8 +25,11 @@ static Frame frames[2], *s_f = &frames[0];
 static VkDevice s_dev;
 static VkDescriptorSetLayout s_dsl, s_pp_dsl;
 static uint32_t s_frame;
+static uint32_t s_cb_gen;
+static int s_android_descriptor_contents;
 static int s_android_dynamic_descriptors, s_android_descriptor_reuse;
 #include "nv2a_vk_descriptor_reuse.h"
+#include "nv2a_vk_descriptor_contents.h"
 static void android_descriptor_cache_reset(Frame *frame) { (void)frame; }
 #include "descriptor_reset_under_test.h"
 #include "descriptor_adapter_under_test.h"
@@ -92,28 +95,44 @@ static uint64_t cpu_ns(void)
     return (uint64_t)time.tv_sec * 1000000000u + (uint64_t)time.tv_nsec;
 }
 static double benchmark(int mode, VkCommandPool pool, VkCommandBuffer command,
-    VkPipelineLayout layout, VkPipelineLayout present_layout)
+    VkPipelineLayout layout, VkPipelineLayout present_layout, uint32_t repeat)
 {
     const uint32_t draws = 2048, epochs = 32;
+#ifdef TEST_DESCRIPTOR_CONTENTS
+    s_android_descriptor_reuse = 1;
+    s_android_descriptor_contents = mode;
+#else
     s_android_descriptor_reuse = mode;
+#endif
     uint64_t elapsed = 0;
     for (uint32_t epoch = 0; epoch < epochs + 2; epoch++) {
         s_f = &frames[epoch % 2];
         VK(vkResetCommandPool(s_dev, pool, 0));
         VkCommandBufferBeginInfo begin = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         VK(vkBeginCommandBuffer(command, &begin));
-        if (epoch == 2) memset(&s_android_descriptor_reuse_stats, 0, sizeof s_android_descriptor_reuse_stats);
+        s_cb_gen++;
+        if (epoch == 2) {
+            memset(&s_android_descriptor_reuse_stats, 0, sizeof s_android_descriptor_reuse_stats);
+            memset(&s_android_descriptor_contents_stats, 0, sizeof s_android_descriptor_contents_stats);
+        }
         uint64_t start = cpu_ns();
         android_frame_reset(s_f);
         for (uint32_t i = 0; i < draws; i++)
-            descriptor_draw(command, layout, epoch * draws + i, 0, VK_PIPELINE_BIND_POINT_GRAPHICS);
+            descriptor_draw(command, layout, epoch * draws + i / repeat, 0, VK_PIPELINE_BIND_POINT_GRAPHICS);
         descriptor_draw(command, present_layout, epoch, 1, VK_PIPELINE_BIND_POINT_GRAPHICS);
         if (epoch >= 2) elapsed += cpu_ns() - start;
         VK(vkEndCommandBuffer(command));
     }
     if (mode) {
         assert(!s_android_descriptor_reuse_stats.allocated);
+#ifdef TEST_DESCRIPTOR_CONTENTS
+        uint64_t hits = (uint64_t)(draws - (draws + repeat - 1) / repeat) * epochs;
+        assert(s_android_descriptor_contents_stats.skipped == hits);
+        assert(s_android_descriptor_contents_stats.matches == hits);
+        assert(s_android_descriptor_reuse_stats.reused == (draws + 1) * epochs - hits);
+#else
         assert(s_android_descriptor_reuse_stats.reused == (draws + 1) * epochs);
+#endif
     }
     return (double)elapsed / ((draws + 1) * epochs);
 }
@@ -224,14 +243,19 @@ int main(int argc, char **argv)
     VkShaderModule shader = VK_NULL_HANDLE; VkPipeline pipeline = VK_NULL_HANDLE;
     if (bench) {
         puts("CPU-only descriptor recording, 2048 guest + 1 presentation per epoch, 32 measured epochs; ns/request (includes reset/update/bind; excludes GPU)");
+#ifdef TEST_DESCRIPTOR_CONTENTS
+        for (uint32_t repeat = 1; repeat <= 16; repeat *= 4)
+#else
+        const uint32_t repeat = 1;
+#endif
         for (uint32_t pair = 0; pair < 5; pair++) {
             double times[2];
             for (uint32_t order = 0; order < 2; order++) {
                 int mode = (int)((order + pair) % 2);
-                times[mode] = benchmark(mode, pool, commands[0], layout, present_layout);
+                times[mode] = benchmark(mode, pool, commands[0], layout, present_layout, repeat);
             }
-            printf("pair=%u legacy_ns=%.1f reuse_ns=%.1f speedup=%.3f warmed_reuse_allocations=0\n",
-                pair, times[0], times[1], times[0] / times[1]);
+            printf("repeat=%u pair=%u baseline_ns=%.1f optimized_ns=%.1f speedup=%.3f warmed_reuse_allocations=0\n",
+                repeat, pair, times[0], times[1], times[0] / times[1]);
         }
     } else {
         FILE *file = fopen(argv[1], "rb"); assert(file); fseek(file, 0, SEEK_END); long bytes = ftell(file); rewind(file);
@@ -243,16 +267,37 @@ int main(int argc, char **argv)
             .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = shader, .pName = "main"}, .layout = layout};
         VK(vkCreateComputePipelines(s_dev, VK_NULL_HANDLE, 1, &pci, NULL, &pipeline));
         unsigned failures = 0;
-        for (uint32_t mode = 0; mode < 2; mode++) for (uint32_t epoch = 0; epoch < EPOCHS; epoch++) {
-            s_android_descriptor_reuse = (int)mode; s_f = &frames[epoch % 2]; s_frame++;
+        uint64_t expected_skips = 0, expected_matches = 0;
+#ifdef TEST_DESCRIPTOR_CONTENTS
+        const uint32_t modes = 3;
+#else
+        const uint32_t modes = 2;
+#endif
+        for (uint32_t mode = 0; mode < modes; mode++) for (uint32_t epoch = 0; epoch < EPOCHS; epoch++) {
+#ifdef TEST_DESCRIPTOR_CONTENTS
+            s_android_descriptor_reuse = 1;
+            s_android_descriptor_contents = (int)mode;
+#else
+            s_android_descriptor_reuse = (int)mode;
+#endif
+            s_f = &frames[epoch % 2]; s_frame++;
             VK(vkResetCommandPool(s_dev, pool, 0)); android_frame_reset(s_f);
             memset(output, 0, CASES * 16);
             for (uint32_t part = 0; part < 2; part++) {
                 VK(vkBeginCommandBuffer(commands[part], &begin));
+                s_cb_gen++;
                 vkCmdBindPipeline(commands[part], VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
                 vkCmdBindDescriptorSets(commands[part], VK_PIPELINE_BIND_POINT_COMPUTE, layout, 1, 1, &out_set, 0, NULL);
                 for (uint32_t i = part * CASES / 2; i < (part + 1) * CASES / 2; i++) {
-                    descriptor_draw(commands[part], layout, epoch * CASES + i, 0, VK_PIPELINE_BIND_POINT_COMPUTE);
+                    uint32_t value = epoch * CASES + i;
+#ifdef TEST_DESCRIPTOR_CONTENTS
+                    value /= 7; /* Repeats straddle the two command buffers. */
+                    if (mode && i > part * CASES / 2 && value == (epoch * CASES + i - 1) / 7) {
+                        expected_matches++;
+                        if (mode == 1) expected_skips++;
+                    }
+#endif
+                    descriptor_draw(commands[part], layout, value, 0, VK_PIPELINE_BIND_POINT_COMPUTE);
                     vkCmdPushConstants(commands[part], layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, &i);
                     vkCmdDispatch(commands[part], 1, 1, 1);
                 }
@@ -268,20 +313,36 @@ int main(int argc, char **argv)
             }
             VK(vkWaitForFences(s_dev, 1, &fence, VK_TRUE, UINT64_MAX)); VK(vkResetFences(s_dev, 1, &fence));
             for (uint32_t i = 0; i < CASES; i++) {
-                VkDeviceSize offsets[3]; offsets_for(epoch * CASES + i, offsets);
+                uint32_t value = epoch * CASES + i;
+#ifdef TEST_DESCRIPTOR_CONTENTS
+                value /= 7;
+#endif
+                VkDeviceSize offsets[3]; offsets_for(value, offsets);
                 for (uint32_t j = 0; j < 4; j++) {
                     uint32_t expected = ((uniform[offsets[0] / 4 + j] + uniform[offsets[1] / 4 + (j + 1) % 4]) ^
-                        uniform[offsets[2] / 4 + (j + 2) % 4]) + texels[(epoch * CASES + i + j) % 2];
+                        uniform[offsets[2] / 4 + (j + 2) % 4]) + texels[(value + j) % 2];
                     if (output[i * 4 + j] != expected) failures++;
                 }
             }
         }
         printf("GPU ordinary/reused vs CPU: %u dispatches, %u components, failures=%u allocated=%llu reused=%llu\n",
-            2 * EPOCHS * CASES, 2 * EPOCHS * CASES * 4, failures,
+            modes * EPOCHS * CASES, modes * EPOCHS * CASES * 4, failures,
             (unsigned long long)s_android_descriptor_reuse_stats.allocated,
             (unsigned long long)s_android_descriptor_reuse_stats.reused);
-        assert(!failures && s_android_descriptor_reuse_stats.allocated == 2 * CASES &&
+        assert(!failures);
+#ifdef TEST_DESCRIPTOR_CONTENTS
+        assert(expected_skips && expected_matches == 2 * expected_skips);
+        assert(s_android_descriptor_contents_stats.skipped == expected_skips);
+        assert(s_android_descriptor_contents_stats.matches == expected_matches);
+        assert(s_android_descriptor_reuse_stats.allocated + s_android_descriptor_reuse_stats.reused
+            == (uint64_t)modes * EPOCHS * CASES - expected_skips);
+        printf("exact consecutive matches=%llu skipped_update_bind_pairs=%llu\n",
+            (unsigned long long)expected_matches, (unsigned long long)expected_skips);
+#else
+        (void)expected_skips; (void)expected_matches;
+        assert(s_android_descriptor_reuse_stats.allocated == 2 * CASES &&
             s_android_descriptor_reuse_stats.reused == (EPOCHS - 2) * CASES);
+#endif
     }
     VK(vkDeviceWaitIdle(s_dev)); vkDestroyCommandPool(s_dev, pool, NULL);
     for (uint32_t i = 0; i < 2; i++) {

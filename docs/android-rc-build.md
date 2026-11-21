@@ -25,6 +25,7 @@ than requiring users to reproduce the investigation's device properties.
 | Direct vertex upload cache | On on Android | debug.nfsu.vertex_cache=0; 2 measures reuse without skipping uploads; next process |
 | Fused index upload | On on Android | debug.nfsu.index_fuse=0 restores the previous path; next process |
 | Descriptor allocation reuse | On on Android ordinary-descriptor path | debug.nfsu.descriptor_reuse=0 restores per-draw allocation; next process |
+| Consecutive descriptor contents | On with Android ordinary descriptor allocation reuse; exact contents/context only | debug.nfsu.descriptor_contents=0 restores update/bind calls; 2 counts matches without skipping; next process |
 | Uniform block reuse | On on Android, with per-stage backoff on misses | debug.nfsu.uniform_cache=0 restores per-draw block construction/upload; next process |
 | Bulk shader constant packets | On on Android for packets of 16–32 dwords | debug.nfsu.const_bulk=0 restores the scalar packet loop; next process |
 | Small texture sample snapshots | On on Android for 1–4 KiB source spans | debug.nfsu.tex_samples=0 restores the existing hash check; next process |

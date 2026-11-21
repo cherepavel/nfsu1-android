@@ -1,0 +1,5 @@
+[
+  {"instruction": "0x001CF45B", "address": "0x001DE94C", "helper": "nfsu1_present_interval"},
+  {"instruction": "0x001CF511", "address": "0x001DE94C", "helper": "nfsu1_present_interval"},
+  {"instruction": "0x001CF5D5", "address": "0x001DE94C", "helper": "nfsu1_present_interval"}
+]

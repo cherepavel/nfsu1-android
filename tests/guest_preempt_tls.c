@@ -57,7 +57,7 @@ int main(void)
 {
     check(XGF_PREEMPT_NATIVE);
     XgfExecutor e = {.owner = owner_id()};
-    XgfFiber self = {.executor = &e, .preempt_valid = 1};
+    XgfFiber self = {.executor = &e};
     XgfFiber peer = {.executor = &e, .state = XGF_NEW, .priority = 1};
     assert(!pthread_mutex_init(&e.wake_lock, NULL));
     assert(!pthread_cond_init(&e.wake, NULL));
@@ -66,7 +66,8 @@ int main(void)
     self.context.kernel.gil_depth = 1;
     clock_reads = 0; check(XGF_PREEMPT_STAY); assert(!clock_reads);
     self.suspended = 1; check(XGF_PREEMPT_YIELD); self.suspended = 0;
-    e.list = &peer; self.preempt_valid = 0;
+    e.list = &peer;
+    assert(xgf_set_priority(&peer, 1));
     clock_reads = 0; check(XGF_PREEMPT_YIELD); assert(!clock_reads);
     assert(xgf_should_preempt());
     int *guards[] = {&e.on_native_callback, &self.context.kernel.gil_nopreempt,
@@ -86,9 +87,13 @@ int main(void)
     clock_ms++;
     clock_reads = 0; check(XGF_PREEMPT_YIELD); assert(clock_reads == 2);
     assert(xgf_should_preempt());
+    self.context.kernel.gil_nopreempt = 1;
+    clock_reads = 0; check(XGF_PREEMPT_STAY); assert(!clock_reads);
+    self.context.kernel.gil_nopreempt = 0;
     assert(xgf_set_priority(&peer, -1)); check(XGF_PREEMPT_STAY);
+    peer.state = XGF_WAITING;
     assert(xgf_set_priority(&peer, 1));
-    peer.state = XGF_WAITING; self.preempt_valid = 0; check(XGF_PREEMPT_STAY);
+    check(XGF_PREEMPT_STAY);
     xgf_notify(&peer); check(XGF_PREEMPT_YIELD);
 
     pthread_t thread;

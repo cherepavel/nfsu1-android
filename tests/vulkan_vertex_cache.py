@@ -17,8 +17,10 @@ args.output_dir.mkdir(parents=True, exist_ok=True)
 source = (root / "xboxrecomp/src/nv2a_vk/nv2a_vk.c").read_text()
 start = source.index("typedef struct { const uint8_t *lo, *hi; VkDeviceSize at; } VRun;")
 end = source.index("/* ── Back end entry points", start)
+audit = (root / "xboxrecomp/src/nv2a_vk/nv2a_vk_draw_audit.h").read_text()
 (args.output_dir / "vertex_upload_under_test.h").write_text(
-    '#include "nv2a_vk_vertex_cache.h"\n' + source[start:end])
+    '#include "nv2a_vk_vertex_cache.h"\n' + audit[:audit.index("static void draw_audit_flip(")]
+    + source[start:end])
 selector_start = source.index("static int vertex_cache_mode(void)")
 selector_end = source.index('#include "nv2a_vk_vertex_cache.h"', selector_start)
 (args.output_dir / "vertex_selector_under_test.h").write_text(source[selector_start:selector_end])

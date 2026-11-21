@@ -1,7 +1,7 @@
 /* Frame-owned descriptor allocations. The cursor resets only after this
  * Frame's fence completes, at the same point as the legacy pool reset.
- * Every returned set is updated before binding, and is used at most once
- * before the next reset. No descriptor-content cache or dynamic offsets. */
+ * Each handle is assigned once per epoch and updated before its first bind.
+ * Content reuse can retain that immutable binding. No dynamic offsets here. */
 #define ANDROID_REUSE_SETS_PER_POOL 8192u
 #define ANDROID_REUSE_MAX_POOLS 2u
 

@@ -23,10 +23,17 @@ end = source.index("static struct {", start)
 (args.output_dir / "index_selector_under_test.h").write_text(source[start:end])
 start = source.index("static struct {\n    int          on;")
 end = source.index("static int s_inst_on", start)
+regs_start = source.index("extern uint8_t *nv2a_pb_reg_dirty(void);")
 match_start = source.index("static int pend_matches(", end)
 match_end = source.index("/* Can b be held", match_start)
+flush_start = source.index("static void pend_flush(void)\n{", end)
+hold_start = source.index("static void pend_hold(", match_end)
+hold_end = source.index("static void vk_draw_raw_impl(", hold_start)
+main_start = source.index("static int main_instance_surface(")
+main_end = source.index("static void scene_instance_report(", main_start)
 (args.output_dir / "index_instancing_under_test.h").write_text(
-    source[start:end] + source[match_start:match_end])
+    "#define __ANDROID__ 1\n" + source[regs_start:end] + source[main_start:main_end] + source[flush_start:match_end]
+    + source[hold_start:hold_end] + "#undef __ANDROID__\n")
 binary = args.output_dir / "vulkan-index-upload"
 command = shlex.split(args.cc) + ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
     "-Wno-missing-field-initializers", "-I" + str(root / "third_party/SDL/src/video/khronos"),

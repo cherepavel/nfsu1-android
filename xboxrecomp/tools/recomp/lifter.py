@@ -1275,7 +1275,8 @@ class Lifter:
 
     def __init__(self, func_db=None, label_db=None, abi_db=None, xbe_data=None,
                  seh_prolog=None, seh_epilog=None,
-                 setjmp_fn=None, longjmp_fn=None, manual_functions=None):
+                 setjmp_fn=None, longjmp_fn=None, manual_functions=None,
+                 load32_hooks=None):
         """
         func_db: dict of func_addr → func_info (for naming call targets)
         label_db: dict of addr → name (for kernel imports, etc.)
@@ -1289,6 +1290,8 @@ class Lifter:
         self.abi_db = abi_db or {}
         self.xbe_data = xbe_data
         self.manual_functions = set(manual_functions or ())
+        self.load32_hooks = dict(load32_hooks or {})
+        self.used_load32_hooks = set()
         # Wrapped functions: the project defines sub_X itself around the
         # generated sub_X_gen. Their callers call sub_X directly -- it is a
         # plain symbol -- instead of resolving it through the dispatch
@@ -1375,6 +1378,9 @@ class Lifter:
         m = insn.mnemonic
         ops = insn.operands
         nops = len(ops)
+
+        if self.load32_hooks and insn.address in self.load32_hooks:
+            return self._lift_hooked_load32(insn)
 
         # ── NOP ──
         if m == "nop" or (m == "lea" and nops == 2 and
@@ -1768,6 +1774,22 @@ class Lifter:
         return self._unimplemented(insn, m)
 
     # ── MOV family ──
+
+    def _lift_hooked_load32(self, insn):
+        address, helper = self.load32_hooks[insn.address]
+        if insn.mnemonic == "mov" and len(insn.operands) == 2:
+            dst, src = insn.operands
+            if (dst.type == "reg" and dst.reg in
+                    ("eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp")
+                    and src.type == "mem" and src.mem_size == 4
+                    and not (src.mem_base or src.mem_index or src.mem_seg)
+                    and src.mem_disp == address):
+                self.used_load32_hooks.add(insn.address)
+                value = f"{helper}({_fmt_mem_read(src)})"
+                return [f"{{ extern uint32_t {helper}(uint32_t); "
+                        f"{_fmt_operand_write(dst, value)} }}"]
+        raise ValueError(f"load32 hook at 0x{insn.address:08X} expected a MOV "
+                         f"from absolute address 0x{address:08X} to a 32-bit register")
 
     def _lift_mov(self, insn, ops):
         if nops := len(ops) < 2:

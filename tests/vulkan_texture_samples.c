@@ -117,13 +117,48 @@ static void run(int enabled, int record)
     s_frame++; GET(0x12,32,16,0,0,1);
     s_frame++; GET(0x12,32,16,128,0,2);
     guest[va] ^= 0xa1; s_frame++; GET(0x12,32,16,128,0,2);
+    s_palette_reg = 0x1000 | (3 << 2);
     s_palette_va = 0x20000; va = 0x30000;
     GET(0x0b,32,32,0,0,1);
+    unsigned p8_uploads = uploads;
+    /* Data next to the guest indices and the 32-entry palette is unrelated. */
+    guest[va + 32 * 32] ^= 1;
+    s_frame++; GET(0x0b,32,32,0,0,1); assert(uploads == p8_uploads);
+    guest[s_palette_va + 32 * 4] ^= 1;
+    s_frame++; GET(0x0b,32,32,0,0,1); assert(uploads == p8_uploads);
+    guest[va + 4] ^= 1;
     s_frame++; GET(0x0b,32,32,0,0,1);
+    assert(uploads == p8_uploads + 1);
     guest[s_palette_va + 19] ^= 1;
     s_frame++; GET(0x0b,32,32,0,0,1);
-    memcpy(guest + s_palette_va + 4096, guest + s_palette_va, 1024); s_palette_va += 4096;
+    assert(uploads == p8_uploads + 2);
+    memcpy(guest + s_palette_va + 4096, guest + s_palette_va, 32 * 4); s_palette_va += 4096;
+    s_frame++; GET(0x0b,32,32,0,0,1); assert(uploads == p8_uploads + 2);
+    s_palette_reg = 0x1000 | (2 << 2);
     s_frame++; GET(0x0b,32,32,0,0,1);
+    assert(uploads == p8_uploads + 3);
+    s_palette_reg = 0;
+    s_frame++; GET(0x0b,32,32,0,0,1);
+    assert(uploads == p8_uploads + 4);
+    guest[s_palette_va] ^= 1;
+    s_frame++; GET(0x0b,32,32,0,0,1); assert(uploads == p8_uploads + 4);
+    s_palette_reg = 0x1000 | (3 << 2);
+    s_frame++; GET(0x0b,32,32,0,0,1);
+    assert(uploads == p8_uploads + 5);
+
+    va = 0xd0000;
+    GET(0x0b,512,512,0,0,1);
+    p8_uploads = uploads;
+    guest[va + 512 * 512] ^= 1;
+    s_frame++; GET(0x0b,512,512,0,0,1); assert(uploads == p8_uploads);
+
+    for (unsigned width = 1; width <= 2; width++) {
+        va = (4u << 20) - width;
+        GET(0x0b,width,1,0,0,1);
+        p8_uploads = uploads;
+        guest[va + width - 1] ^= 1;
+        s_frame++; GET(0x0b,width,1,0,0,1); assert(uploads == p8_uploads + 1);
+    }
     va = 0x50000; GET(0x0c,32,32,0,512,2);
     s_frame++; GET(0x0c,32,32,0,512,2);
     const unsigned widths[] = {255, 256, 1024, 1025};
@@ -158,5 +193,5 @@ int main(int argc, char **argv)
     run(0, 1); unsigned count = result_count;
     run(1, 0); assert(result_count == count);
     cleanup(); free(guest);
-    puts("PASS: production texture cache scalar/snapshot parity, frame policy, palette/cube/format changes, FNV collision fallback, OOM and eviction ownership");
+    puts("PASS: production texture cache scalar/snapshot parity, P8 bounds, frame policy, palette/cube/format changes, FNV collision fallback, OOM and eviction ownership");
 }

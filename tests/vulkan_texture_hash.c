@@ -72,10 +72,10 @@ int main(int argc, char **argv)
 {
     if (argc == 2 && !strcmp(argv[1], "--bench")) { benchmark(); return 0; }
     assert(argc == 1);
-    /* Exact-end allocations expose overreads to ASan. The three-byte prefix
-     * also reproduces the legacy final-four-byte read for spans of 1..3. */
-    for (uint32_t bytes = 0; bytes <= 8192; bytes++) for (uint32_t offset = 3; offset < 19; offset++) {
-        guest = malloc((size_t)offset + bytes); assert(guest);
+    /* Include exact starts and ends to expose overreads to ASan. */
+    for (uint32_t bytes = 0; bytes <= 8192; bytes++) for (uint32_t offset = 0; offset < 16; offset++) {
+        size_t allocation = (size_t)offset + bytes;
+        guest = malloc(allocation ? allocation : 1); assert(guest);
         memset(guest, 0x81, offset + bytes);
         check(offset, bytes);
         if (bytes) {
