@@ -40,8 +40,11 @@
 #include "../d3d/d3d8_dxt.h"
 #include "nv2a_backend.h"
 #include "nv2a_indices.h"
+#include "nv2a_const_upload.h"
+#include "nv2a_raw_indices.h"
 #include "nv2a_ui_marker.h"
 #ifdef __ANDROID__
+#include <sys/system_properties.h>
 #include "nv2a_fence_wait.h"
 static Nv2aFenceWait s_fence_wait = NV2A_FENCE_WAIT_INITIALIZER;
 #endif
@@ -62,6 +65,23 @@ static int env_once(const char *name, int *cache)
 }
 static int pb_verbose(void)   { static int c = -1; return env_once("RECOMP_PB_EXEC_VERBOSE", &c); }
 static int pb_ffp_trace(void) { static int c = -1; return env_once("RECOMP_FFP_TRACE", &c); }
+static int pb_const_bulk_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+#ifdef __ANDROID__
+        char property[PROP_VALUE_MAX] = {0};
+        const char *value = getenv("RECOMP_PB_CONST_BULK");
+        if (!value && __system_property_get("debug.nfsu.const_bulk", property) > 0)
+            value = property;
+        enabled = !value || !*value || !strcmp(value, "1");
+#else
+        enabled = 0;
+#endif
+        NFS_LOG_INFO("graphics", "[PBCONST] bulk=%d (startup only)\n", enabled);
+    }
+    return enabled;
+}
 void nv2a_pb_exec_report(void);
 
 /* Would writing this surface land on the title's own image?
@@ -613,7 +633,7 @@ static void surface_apply_clip(void)
 #define NV097_SET_TRANSFORM_PROGRAM_START  0x1EA0
 #define NV097_SET_TRANSFORM_CONSTANT_LOAD  0x1EA4
 #define VP_SLOTS  136
-#define VP_CONSTS 192
+#define VP_CONSTS NV2A_VP_CONSTANTS
 
 static struct {
     uint32_t prog[VP_SLOTS][4];
@@ -3248,6 +3268,7 @@ void (*nv2a_raw_batch_hook)(Nv2aRawBatch *rb, float *attrs);
 static void raw_batch(void)
 {
     Nv2aRawBatch rb;
+    int index_direct = nv2a_raw_indices_direct(s_backend->flags, nv2a_raw_batch_hook != NULL);
     uint32_t lo = 0xFFFFFFFFu, hi = 0, i, a, nv;
     uint16_t present = 0, direct = 0;
 
@@ -3271,12 +3292,12 @@ static void raw_batch(void)
         s_raw_attrs = (float *)malloc((size_t)s_raw_cap_v * NV2A_RAW_ATTRS * 4
                                       * sizeof(float));
     }
-    if (s_gpu.idx_count > s_raw_cap_i) {
+    if (!index_direct && s_gpu.idx_count > s_raw_cap_i) {
         free(s_raw_idx);
         s_raw_cap_i = s_gpu.idx_count + 1024;
         s_raw_idx = (uint32_t *)malloc((size_t)s_raw_cap_i * sizeof(uint32_t));
     }
-    if (!s_raw_attrs || !s_raw_idx)
+    if (!s_raw_attrs || (!index_direct && !s_raw_idx))
         return;
     for (a = 0; a < NV2A_RAW_ATTRS && a < NV_VERTEX_ATTRS; a++)
         if (s_gpu.attr[a].size && s_gpu.attr[a].stride)
@@ -3306,15 +3327,12 @@ static void raw_batch(void)
             }
         }
     }
-    for (i = 0; i < s_gpu.idx_count; i++)
-        s_raw_idx[i] = s_gpu.idx[i] - lo;
+    nv2a_raw_indices_bind(&rb, index_direct, s_gpu.idx, s_raw_idx, s_gpu.idx_count, lo);
 
     rb.prim = s_gpu.prim;
     rb.vertex_count = nv;
     rb.attr_present = present;
     rb.attrs = s_raw_attrs;
-    rb.indices = s_raw_idx;
-    rb.index_count = s_gpu.idx_count;
     rb.regs = s_reg;
     rb.vp_program = (const uint32_t (*)[4])s_vp.prog;
     rb.vp_slots = VP_SLOTS;
@@ -4577,18 +4595,25 @@ uint32_t nv2a_pb_exec_run(uint32_t subch, uint32_t method, int noninc,
         return count;
     }
     if (!noninc && method >= NV097_SET_TRANSFORM_CONSTANT
-        && method + count * 4 <= NV097_SET_TRANSFORM_CONSTANT + 0x80) {
+        && method < NV097_SET_TRANSFORM_CONSTANT + 0x80
+        && count <= (NV097_SET_TRANSFORM_CONSTANT + 0x80 - method) / 4) {
         uint32_t slot = (method - NV097_SET_TRANSFORM_CONSTANT) / 4;
-        for (i = 0; i < count; i++, slot++) {
-            uint32_t w = (method / 4) + i;
-            if (s_reg[w] != p[i]) {
-                s_reg[w] = p[i];
-                s_reg_dirty[w >> 4] = 1;
+        /* Short packets are cheaper in the original scalar loop. */
+        if (count >= 16 && pb_const_bulk_enabled()) {
+            nv2a_shadow_write_run(s_reg, s_reg_dirty, method / 4, p, count);
+            s_vp.const_load = nv2a_constant_write_run(s_vp.c, s_vp.const_load, slot % 4, p, count);
+        } else {
+            for (i = 0; i < count; i++, slot++) {
+                uint32_t w = (method / 4) + i;
+                if (s_reg[w] != p[i]) {
+                    s_reg[w] = p[i];
+                    s_reg_dirty[w >> 4] = 1;
+                }
+                if (s_vp.const_load < VP_CONSTS)
+                    memcpy(&s_vp.c[s_vp.const_load][slot % 4], &p[i], 4);
+                if (slot % 4 == 3)
+                    s_vp.const_load++;
             }
-            if (s_vp.const_load < VP_CONSTS)
-                memcpy(&s_vp.c[s_vp.const_load][slot % 4], &p[i], 4);
-            if (slot % 4 == 3)
-                s_vp.const_load++;
         }
         s_vp.gen++;
         s_vp.const_gen++;

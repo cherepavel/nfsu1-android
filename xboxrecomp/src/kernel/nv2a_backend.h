@@ -96,7 +96,7 @@ typedef struct {
     uint16_t        attr_present;   /* bit a: attribute a carries data */
     const float    *attrs;          /* vertex_count x 16 x float4, [v][a][c];
                                      * absent attributes read (0,0,0,1) */
-    const uint32_t *indices;        /* into the gathered vertices */
+    const uint32_t *indices;        /* gathered vertex = indices[i] - index_base */
     uint32_t        index_count;
     const uint32_t *regs;           /* method shadow, 0x2000 bytes */
     const uint32_t (*vp_program)[4];/* transform program slots */
@@ -150,6 +150,12 @@ typedef struct {
      * and equal direct[] pointers read the same vertex bytes, so a back end
      * may reuse what it uploaded for the first (instancing). */
     uint32_t        vtx_epoch;
+    /* Nonzero only for a backend advertising NV2A_BACKEND_INDEX_BASE.
+     * Such a backend may receive the executor's original index array and
+     * must subtract this base while uploading. The pointer is borrowed only
+     * until draw_raw returns; deferred work must copy it. Other backends and
+     * the legacy raw-batch hook always receive rebased indices, base 0. */
+    uint32_t        index_base;
 } Nv2aRawBatch;
 
 /* Resolve a DMA offset the title programmed (texture, surface) to a guest VA. */
@@ -174,6 +180,9 @@ typedef struct {
 /* draw_raw takes attributes in their stored format (Nv2aRawBatch.attr_direct).
  * RECOMP_GL_DIRECT=0 turns it off at run time. */
 #define NV2A_BACKEND_RAW_DIRECT 0x1u
+/* Accept original indices plus Nv2aRawBatch.index_base, avoiding the
+ * executor's intermediate rebased uint32_t copy. Independent of RAW_DIRECT. */
+#define NV2A_BACKEND_INDEX_BASE 0x2u
 
 /* Optional, set by the game project: sees every raw batch just before the
  * back end gets it and may change it. attrs is rb->attrs, writable; an

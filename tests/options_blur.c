@@ -6,9 +6,7 @@
 #include <unistd.h>
 #include "../src/recomp_manual.c"
 
-ptrdiff_t g_xbox_mem_offset;
-RECOMP_TLS uint32_t g_eax, g_ecx, g_edx, g_esp;
-RECOMP_TLS uint32_t g_ebx, g_esi, g_edi, g_ebp, g_seh_ebp;
+#include "manual_registers.h"
 static unsigned char ram[0x300000];
 static unsigned calls;
 static uint32_t expected_native_bloom;

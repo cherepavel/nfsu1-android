@@ -21,6 +21,7 @@ Options:
 import argparse
 import json
 import os
+import re
 import sys
 import time
 
@@ -84,6 +85,22 @@ def _load_addrs(path):
             e = e.get("start") or e.get("address")
         out.add(int(e, 16) if isinstance(e, str) else int(e))
     return out
+
+
+def _load_load32_hooks(path):
+    if not path:
+        return {}
+    with open(path, encoding="utf-8") as fh:
+        entries = json.load(fh)
+    hooks = {}
+    for entry in entries:
+        pc = int(entry["instruction"], 0)
+        address = int(entry["address"], 0)
+        helper = entry["helper"]
+        if pc in hooks or not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", helper):
+            raise ValueError(f"invalid or duplicate load32 hook at 0x{pc:08X}")
+        hooks[pc] = (address, helper)
+    return hooks
 
 
 def _load_manual_protection(manual_functions, exclude_manual):
@@ -256,6 +273,9 @@ def main():
                              "accesses go through MMIO_RD/MMIO_WR so the runtime "
                              "can route device addresses to a device model "
                              "without trapping faults")
+    parser.add_argument("--load32-hooks", metavar="FILE",
+                        help="JSON list of instruction/address/helper mappings "
+                             "for selected absolute 32-bit loads")
     parser.add_argument("--coalesce-functions", metavar="JSON", action="append",
                         help="Explicit owner bounds and false interior starts "
                              "to merge before translation; repeatable")
@@ -265,6 +285,7 @@ def main():
                         help="Address of __SEH_epilog (hex). Auto-detected if omitted")
 
     args = parser.parse_args()
+    load32_hooks = _load_load32_hooks(args.load32_hooks)
 
     # Boundary repair is destructive: an interior function start disappears
     # once it is coalesced into its owner. Load hand-written entry points before
@@ -323,6 +344,7 @@ def main():
         output_dir=args.output_dir,
         trace_functions=_load_addrs(args.trace_functions),
         force_returns=_parse_force_returns(args.force_return),
+        load32_hooks=load32_hooks,
         coalesce_json_paths=args.coalesce_functions,
         protected_function_starts=protected_function_starts,
         seh_prolog=int(args.seh_prolog, 16) if args.seh_prolog else None,
@@ -526,6 +548,12 @@ def main():
         print(f"\n=== Translation Complete ({t_translate:.1f}s) ===",
               file=sys.stderr)
         print_stats(stats)
+
+    if args.all and not (args.category or args.game_only or args.max_funcs):
+        missing = load32_hooks.keys() - translator.translator.lifter.used_load32_hooks
+        if missing:
+            sites = ", ".join(f"0x{pc:08X}" for pc in sorted(missing))
+            raise SystemExit(f"Configured load32 hooks were not emitted: {sites}")
 
     # Write summary
     output_dir = args.output_dir or os.path.join(

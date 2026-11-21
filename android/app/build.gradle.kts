@@ -57,6 +57,7 @@ val generateRecomp = tasks.register("generateRecomp") {
     dependsOn(prepareRecompPython)
     inputs.file(xbe).withPropertyName("xbe")
     inputs.file(repository.resolve("config/seed_functions.json"))
+    inputs.file(repository.resolve("config/present_interval_loads.json"))
     inputs.file(repository.resolve("src/recomp_manual.c"))
     inputs.file(repository.resolve("xboxrecomp/templates/runtime/recomp_types.h"))
     inputs.file(repository.resolve("xboxrecomp/templates/runtime/recomp_registers.h"))
@@ -92,7 +93,8 @@ val generateRecomp = tasks.register("generateRecomp") {
         runTool("recomp", "--game-name", "NFS Underground", "--all", "--split", "250",
             "--gen-dir", generated.absolutePath, "--disasm-dir", disasm, "--func-id-dir", identified,
             "--abi-dir", abi, "--exclude-manual", repository.resolve("src/recomp_manual.c").absolutePath,
-            "--mmio-sections", "DSOUND,XPP")
+            "--mmio-sections", "DSOUND,XPP",
+            "--load32-hooks", repository.resolve("config/present_interval_loads.json").absolutePath)
     }
 }
 

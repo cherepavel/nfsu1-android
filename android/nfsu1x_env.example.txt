@@ -32,9 +32,39 @@ RECOMP_QUIET=1
 # RECOMP_APU_TRACE=1
 
 # Numeric/explicit switches:
+# Paired-channel low-pass filter on Android ARM64: default 1.
+# Set 0 for the original scalar filter. Fully restart after editing.
+# RECOMP_APU_FILTER_NEON=0
+# Skip unused trace peaks and reduce mix-bin peaks with NEON: default 1.
+# Set 0 for the original diagnostic scans. Fully restart after editing.
+# RECOMP_APU_PEAK_OPT=0
+# Skip consecutive identical ordinary Vulkan descriptor updates/binds: default 1.
+# Set 0 for previous calls, or 2 to count matches without skipping; restart.
+# RECOMP_VK_DESCRIPTOR_CONTENTS=0
 # Adaptive screen aspect + FOV; proportional racing HUD, stretched menus.
 # Default on. Set 0 for the previous presentation; restart after editing.
 # RECOMP_ADAPTIVE_WIDESCREEN=0
+# Direct vertex upload reuse: default 1; 0 original, 2 measure only. Restart.
+# RECOMP_VK_VERTEX_CACHE=0
+# Fused index rebase/packing: default 1; 0 restores the previous path. Restart.
+# RECOMP_VK_INDEX_FUSE=0
+# Index upload counters every 300 flips; default off. Restart.
+# RECOMP_VK_INDEX_STATS=1
+# Ordinary descriptor allocation reuse: default 1; 0 per-draw allocation. Restart.
+# Explicit native-push/dynamic-descriptor experiments take precedence.
+# RECOMP_VK_DESCRIPTOR_REUSE=0
+# Immutable uniform-block reuse: default 1 on Android. Restart.
+# Set 0 to rebuild/upload both ordinary uniform blocks on every draw.
+# RECOMP_VK_UNIFORM_CACHE=0
+# Bulk shader constant packets: default 1 on Android, packets >=16 dwords.
+# Set 0 for the previous scalar packet loop. Restart.
+# RECOMP_PB_CONST_BULK=0
+# Compare saved texture samples for 1–4 KiB spans: default 1 on Android.
+# Set 0 for the previous hash check. Restart.
+# RECOMP_VK_TEXTURE_SAMPLES=0
+# Paletted texture tiles + NEON stores on Android ARM64, power-of-two 8–512 per axis.
+# Default 1; set 0 for the previous per-pixel decode loop. Restart.
+# RECOMP_VK_INDEXED_TILES=0
 # RECOMP_FPS_LOG=1
 # RECOMP_VK_TRACE=1
 # XBOX_LOG_LEVEL=3

@@ -34,6 +34,16 @@ typedef struct Submission {
     pthread_cond_t completed;
 } Submission;
 
+/* Reserve two low bits of the cached generation for the ready-list decision.
+ * A generation match by itself is the common case: no peer needs the CPU. */
+enum {
+    PREEMPT_CACHE_STAY = 0,
+    PREEMPT_CACHE_YIELD = 1,
+    PREEMPT_CACHE_SLICE = 2,
+    PREEMPT_CACHE_INVALID = 3,
+    READY_GENERATION_STEP = 4,
+};
+
 struct XgfExecutor {
     NativeContext native;
     RecompContext *caller;
@@ -63,8 +73,7 @@ struct XgfFiber {
     unsigned suspended;
     uint64_t ready_order;
     uint64_t slice_start;
-    uint64_t preempt_generation;
-    int preempt_valid, preempt_higher, preempt_equal;
+    uint64_t preempt_cache;
     HANDLE thread_handle;
     DWORD exit_code;
     LPTHREAD_START_ROUTINE thread_entry;
@@ -84,6 +93,8 @@ static uint64_t monotonic_ms(void);
 static int on_owner(XgfExecutor *e) { return e && e->owner == owner_id(); }
 static uint64_t next_order(XgfExecutor *e)
 { return __atomic_add_fetch(&e->sequence, 1, __ATOMIC_RELAXED); }
+static void ready_changed(XgfExecutor *e)
+{ __atomic_add_fetch(&e->ready_generation, READY_GENERATION_STEP, __ATOMIC_RELEASE); }
 static void mark_ready(XgfFiber *f)
 {
     uint64_t empty = 0;
@@ -166,7 +177,7 @@ XgfFiber *xgf_create(XgfExecutor *e, XgfEntry entry, void *argument,
     f->executor = e; f->entry = entry; f->argument = argument;
     f->mapping = mapping; f->mapping_size = mapping_size; f->state = XGF_NEW;
     f->ready_order = next_order(e);
-    __atomic_add_fetch(&e->ready_generation, 1, __ATOMIC_RELEASE);
+    ready_changed(e);
     uintptr_t top = ((uintptr_t)mapping + page + stack_size) & ~(uintptr_t)15;
 #if defined(__aarch64__)
     f->native.x[0] = (uintptr_t)f; /* x19: bootstrap argument */
@@ -198,7 +209,7 @@ XgfState xgf_resume(XgfExecutor *e, XgfFiber *f)
     __atomic_store_n(&f->notified, 0, __ATOMIC_RELEASE);
     f->state = XGF_RUNNING;
     f->slice_start = monotonic_ms();
-    f->preempt_valid = 0;
+    f->preempt_cache = PREEMPT_CACHE_INVALID;
     __atomic_store_n(&f->ready_order, 0, __ATOMIC_RELEASE);
     e->active = f;
     running = e;
@@ -286,7 +297,7 @@ int xgf_destroy(XgfFiber *f)
     while (*link != f) link = &(*link)->next;
     *link = f->next;
     f->executor->fibers--;
-    __atomic_add_fetch(&f->executor->ready_generation, 1, __ATOMIC_RELEASE);
+    ready_changed(f->executor);
     free(f);
     return 1;
 }
@@ -305,7 +316,7 @@ int xgf_set_priority(XgfFiber *f, int priority)
 {
     if (!f || !on_owner(f->executor)) return 0;
     __atomic_store_n(&f->priority, priority, __ATOMIC_RELAXED);
-    __atomic_add_fetch(&f->executor->ready_generation, 1, __ATOMIC_RELEASE);
+    ready_changed(f->executor);
     return 1;
 }
 int xgf_prepare_wait(XgfFiber *f)
@@ -328,7 +339,7 @@ void xgf_notify(XgfFiber *f)
     pthread_mutex_lock(&e->wake_lock);
     mark_ready(f);
     __atomic_store_n(&f->notified, 1, __ATOMIC_RELEASE);
-    __atomic_add_fetch(&e->ready_generation, 1, __ATOMIC_RELEASE);
+    ready_changed(e);
     pthread_cond_signal(&e->wake);
     pthread_mutex_unlock(&e->wake_lock);
 }
@@ -387,7 +398,7 @@ int xgf_invoke(XgfExecutor *e, LPTHREAD_START_ROUTINE callback,
     e->submitters++;
     *e->submission_tail = &s;
     e->submission_tail = &s.next;
-    __atomic_add_fetch(&e->ready_generation, 1, __ATOMIC_RELEASE);
+    ready_changed(e);
     pthread_cond_signal(&e->wake);
     while (!s.done) pthread_cond_wait(&s.completed, &e->wake_lock);
     e->submitters--;
@@ -422,13 +433,25 @@ static void import_submissions(XgfExecutor *e)
     }
 }
 
+/* Keep the clock's address-taken timespec out of the cached safe-point path.
+ * In Android ARM64 builds it otherwise forces a stack frame and stack-canary
+ * traffic even when there are no equal-priority peers and no clock is read.
+ * Return the status directly so the query can tail-call this uncommon path. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline))
+#endif
+static XgfPreemptStatus fiber_slice_preempt(XgfFiber *self)
+{
+    return monotonic_ms() > self->slice_start ? XGF_PREEMPT_YIELD : XGF_PREEMPT_STAY;
+}
+
 /* Keep list/mutex work out of the cached safe-point path. The generation
  * snapshot is still taken before refresh, exactly as before: a concurrent
  * publication forces another refresh at the next safe point. */
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((noinline, cold))
 #endif
-static void fiber_refresh_preempt(XgfFiber *self, uint64_t generation)
+static XgfPreemptStatus fiber_refresh_preempt(XgfFiber *self, uint64_t generation)
 {
     XgfExecutor *e = self->executor;
     pthread_mutex_lock(&e->wake_lock);
@@ -443,29 +466,38 @@ static void fiber_refresh_preempt(XgfFiber *self, uint64_t generation)
         if (other_priority > priority) higher = 1;
         if (other_priority == priority) equal = 1;
     }
-    self->preempt_higher = higher;
-    self->preempt_equal = equal;
-    self->preempt_generation = generation;
-    self->preempt_valid = 1;
+    if (higher) {
+        self->preempt_cache = generation | PREEMPT_CACHE_YIELD;
+        return XGF_PREEMPT_YIELD;
+    }
+    if (equal) {
+        self->preempt_cache = generation | PREEMPT_CACHE_SLICE;
+        return fiber_slice_preempt(self);
+    }
+    self->preempt_cache = generation;
+    return XGF_PREEMPT_STAY;
 }
 
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((always_inline))
 #endif
-static inline int fiber_should_preempt(XgfFiber *self)
+static inline XgfPreemptStatus fiber_preempt_decision(XgfFiber *self, uint64_t generation)
 {
-    if (__atomic_load_n(&self->suspended, __ATOMIC_ACQUIRE)) return 1;
-    uint64_t generation = __atomic_load_n(&self->executor->ready_generation, __ATOMIC_ACQUIRE);
-    if (!self->preempt_valid || self->preempt_generation != generation)
-        fiber_refresh_preempt(self, generation);
-    return self->preempt_higher ||
-        (self->preempt_equal && monotonic_ms() > self->slice_start);
+    switch (self->preempt_cache ^ generation) {
+    case PREEMPT_CACHE_STAY: return XGF_PREEMPT_STAY;
+    case PREEMPT_CACHE_YIELD: return XGF_PREEMPT_YIELD;
+    case PREEMPT_CACHE_SLICE: return fiber_slice_preempt(self);
+    default: return fiber_refresh_preempt(self, generation);
+    }
 }
 
 int xgf_should_preempt(void)
 {
     XgfFiber *self = xgf_current();
-    return self && !running->on_native_callback && fiber_should_preempt(self);
+    if (!self || running->on_native_callback) return 0;
+    if (__atomic_load_n(&self->suspended, __ATOMIC_ACQUIRE)) return 1;
+    uint64_t generation = __atomic_load_n(&running->ready_generation, __ATOMIC_ACQUIRE);
+    return fiber_preempt_decision(self, generation) == XGF_PREEMPT_YIELD;
 }
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -475,13 +507,16 @@ static inline XgfPreemptStatus fiber_preempt_status(XgfExecutor *e)
 {
     if (!e || !e->active) return XGF_PREEMPT_NATIVE;
     XgfFiber *self = e->active;
-    /* This is the active guest context even during a native-stack callback.
-     * Read it directly instead of resolving current-context TLS or asking
-     * separate bridge/dispatch helpers for each guard. */
+    unsigned suspended = __atomic_load_n(&self->suspended, __ATOMIC_ACQUIRE);
+    uint64_t generation = __atomic_load_n(&e->ready_generation, __ATOMIC_ACQUIRE);
+    /* A cached stay decision has no side effects even in guarded contexts.
+     * Check guards before refreshing the cache, using the clock or yielding. */
+    if (!suspended && self->preempt_cache == generation) return XGF_PREEMPT_STAY;
     const RecompKernelState *k = &self->context.kernel;
     if (e->on_native_callback || k->gil_depth <= 0 || k->gil_nopreempt || k->dispatch_held)
         return XGF_PREEMPT_STAY;
-    return fiber_should_preempt(self) ? XGF_PREEMPT_YIELD : XGF_PREEMPT_STAY;
+    if (suspended) return XGF_PREEMPT_YIELD;
+    return fiber_preempt_decision(self, generation);
 }
 
 XgfPreemptStatus xgf_preempt_status(void)
@@ -547,14 +582,14 @@ static void thread_priority(void *thread, int priority)
 {
     XgfFiber *f = thread;
     __atomic_store_n(&f->priority, priority, __ATOMIC_RELAXED);
-    __atomic_add_fetch(&f->executor->ready_generation, 1, __ATOMIC_RELEASE);
+    ready_changed(f->executor);
     thread_wake(f);
 }
 static void thread_suspend(void *thread, unsigned count)
 {
     XgfFiber *f = thread;
     __atomic_store_n(&f->suspended, count, __ATOMIC_RELEASE);
-    __atomic_add_fetch(&f->executor->ready_generation, 1, __ATOMIC_RELEASE);
+    ready_changed(f->executor);
     thread_wake(f);
 }
 static void thread_exit(void *thread, DWORD code)

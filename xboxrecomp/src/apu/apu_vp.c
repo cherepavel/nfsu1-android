@@ -22,6 +22,54 @@
 
 #include "apu_state.h"
 #include "fpconv.h"
+#include "apu_filter_neon.h"
+#include "apu_peak.h"
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
+#if APU_FILTER_HAS_NEON
+static uint64_t s_filter_paired_blocks, s_filter_fallback_blocks;
+#endif
+
+static int apu_filter_neon_enabled(void)
+{
+#if APU_FILTER_HAS_NEON && (defined(__ANDROID__) || defined(APU_FILTER_NEON_TEST))
+    static int mode = -1;
+    if (mode < 0) {
+        const char *value = getenv("RECOMP_APU_FILTER_NEON");
+#ifdef __ANDROID__
+        char property[PROP_VALUE_MAX] = {0};
+        if (!value && __system_property_get("debug.nfsu.apu_filter_neon", property) > 0)
+            value = property;
+#endif
+        mode = !value || !*value || !strcmp(value, "1");
+        NFS_LOG_INFO("audio", "[APUFILTER] neon=%d (startup only)\n", mode);
+    }
+    return mode;
+#else
+    return 0;
+#endif
+}
+
+static int apu_peak_optimized(void)
+{
+#if defined(__ANDROID__) || defined(APU_PEAK_TEST)
+    static int mode = -1;
+    if (mode < 0) {
+        const char *value = getenv("RECOMP_APU_PEAK_OPT");
+#ifdef __ANDROID__
+        char property[PROP_VALUE_MAX] = {0};
+        if (!value && __system_property_get("debug.nfsu.apu_peak_opt", property) > 0)
+            value = property;
+#endif
+        mode = !value || !*value || !strcmp(value, "1");
+        NFS_LOG_INFO("audio", "[APUPEAK] optimized=%d neon=%d (startup only)\n", mode, APU_PEAK_HAS_NEON);
+    }
+    return mode;
+#else
+    return 0;
+#endif
+}
 
 /* #define DEBUG_MCPX */
 
@@ -1149,6 +1197,8 @@ static void vdump_frame(MCPXAPUState *d, uint16_t v, float post[][2], int fmode,
     }
 }
 
+static int apu_vp_trace_enabled(void);
+
 static void voice_process(MCPXAPUState *d,
                           float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME],
                           float sample_buf[NUM_SAMPLES_PER_FRAME][2],
@@ -1234,7 +1284,8 @@ static void voice_process(MCPXAPUState *d,
                                 NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE);
     if (!active) return;
 
-    {   /* RECOMP_APU_TRACE: what the unpaused voices hold */
+    if (!apu_peak_optimized() || apu_vp_trace_enabled()) {
+        /* Keep the original trace peak calculation whenever trace is on. */
         extern void apu_vp_trace_voice(MCPXAPUState *d, uint16_t v, float peak, float ea);
         float pk = 0.0f;
         for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++)
@@ -1295,6 +1346,7 @@ static void voice_process(MCPXAPUState *d,
         lpf = stereo ? (fmode == 1) : (fmode & 1) != 0;
     }
     if (lpf) {
+        int paired = apu_filter_neon_enabled();
         for (int ch = 0; ch < 2; ch++) {
             int16_t fc = (int16_t)voice_get_mask(
                 d, v, NV_PAVS_VOICE_TAR_FCA + (ch % channels) * 4,
@@ -1306,11 +1358,27 @@ static void voice_process(MCPXAPUState *d,
             float q_f = clampf(q / (1.0f * 0x8000), 0.079407f, 1.0f);
             sv_filter *filter = &d->vp.filters[v].svf[ch];
             setup_svf(filter, fc_f, q_f, F_LP);
-            for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
-                samples[i][ch] = run_svf(filter, samples[i][ch]);
-                samples[i][ch] = fminf(fmaxf(samples[i][ch], -1.0f), 1.0f);
+            if (!paired) {
+                for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
+                    samples[i][ch] = run_svf(filter, samples[i][ch]);
+                    samples[i][ch] = fminf(fmaxf(samples[i][ch], -1.0f), 1.0f);
+                }
             }
         }
+#if APU_FILTER_HAS_NEON
+        if (paired) {
+            if (apu_filter_lowpass_pair(d->vp.filters[v].svf, samples, NUM_SAMPLES_PER_FRAME))
+                s_filter_paired_blocks++;
+            else {
+                s_filter_fallback_blocks++;
+                for (int ch = 0; ch < 2; ch++) {
+                    sv_filter *filter = &d->vp.filters[v].svf[ch];
+                    for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++)
+                        samples[i][ch] = fminf(fmaxf(run_svf(filter, samples[i][ch]), -1.0f), 1.0f);
+                }
+            }
+        }
+#endif
     }
 
     if (vdump)
@@ -1377,11 +1445,16 @@ static float g_vp_mix_peak;
 static int   g_tr_on = -1, g_tr_unpaused, g_tr_sounding;
 static char  g_tr_quiet[200], g_tr_loud[200];
 
+static int apu_vp_trace_enabled(void)
+{
+    if (g_tr_on < 0) g_tr_on = getenv("RECOMP_APU_TRACE") != NULL;
+    return g_tr_on;
+}
+
 void apu_vp_trace_voice(MCPXAPUState *d, uint16_t v, float peak, float ea)
 {
     char *dst;
-    if (g_tr_on < 0) g_tr_on = getenv("RECOMP_APU_TRACE") != NULL;
-    if (!g_tr_on) return;
+    if (!apu_vp_trace_enabled()) return;
     g_tr_unpaused++;
     if (peak > 0.0f) g_tr_sounding++;
     dst = peak > 0.0f ? g_tr_loud : g_tr_quiet;
@@ -1415,6 +1488,20 @@ void apu_vp_get_stats(int *voices, float *mix_peak)
     *mix_peak = g_vp_mix_peak;
     g_vp_voices_max = 0;
     g_vp_mix_peak = 0.0f;
+}
+
+static void apu_vp_note_peak(const float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME])
+{
+    if (apu_peak_optimized()) {
+        _Static_assert(NUM_SAMPLES_PER_FRAME == APU_PEAK_ROW_SAMPLES, "peak row size");
+        g_vp_mix_peak = apu_peak_abs_rows(mixbins, NUM_MIXBINS, g_vp_mix_peak);
+    } else {
+        for (int b = 0; b < NUM_MIXBINS; b++)
+            for (int s = 0; s < NUM_SAMPLES_PER_FRAME; s++) {
+                float a = fabsf(mixbins[b][s]);
+                if (a > g_vp_mix_peak) g_vp_mix_peak = a;
+            }
+    }
 }
 
 void mcpx_apu_vp_frame(MCPXAPUState *d,
@@ -1454,12 +1541,18 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
     }
     if (g_vp_voices_now > g_vp_voices_max)
         g_vp_voices_max = g_vp_voices_now;
-    for (int b = 0; b < NUM_MIXBINS; b++)
-        for (int s = 0; s < NUM_SAMPLES_PER_FRAME; s++) {
-            float a = fabsf(mixbins[b][s]);
-            if (a > g_vp_mix_peak) g_vp_mix_peak = a;
-        }
+    apu_vp_note_peak(mixbins);
     apu_vp_trace_second();
+#if defined(__ANDROID__) && APU_FILTER_HAS_NEON
+    if (apu_filter_neon_enabled()) {
+        static unsigned report_frames;
+        if (++report_frames == 15000) {
+            NFS_LOG_INFO("performance", "[APUFILTER] vp_frames=15000 paired_blocks=%llu fallback_blocks=%llu (since report)\n",
+                (unsigned long long)s_filter_paired_blocks, (unsigned long long)s_filter_fallback_blocks);
+            report_frames = 0; s_filter_paired_blocks = s_filter_fallback_blocks = 0;
+        }
+    }
+#endif
     {   /* RECOMP_APU_RING_STATS=1: stale ring reads every 10 s (Linux; the
          * Switch prints them in its [perf] report) */
         static int on = -1;

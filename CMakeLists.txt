@@ -166,6 +166,10 @@ else()
     if(ANDROID)
         # Lifted SSE/x87 operations have separate guest rounding boundaries.
         list(APPEND NFSU2_GEN_FLAGS "-ffp-contract=off")
+        # Manual wrappers share the lifted code's register/memory ABI. Keep
+        # its aliasing, integer-wrap and separate-FP-operation contract at O2.
+        set_property(SOURCE src/recomp_manual.c APPEND PROPERTY
+            COMPILE_OPTIONS "-O2;-fno-strict-aliasing;-fwrapv;-ffp-contract=off")
     endif()
     if(NFSU2_LTO)
         list(APPEND NFSU2_GEN_FLAGS "-flto=auto")

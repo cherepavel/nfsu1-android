@@ -8,8 +8,7 @@
 #include <sys/mman.h>
 #include "recomp_types.h"
 
-ptrdiff_t g_xbox_mem_offset;
-RECOMP_TLS uint32_t g_ecx;
+#include "manual_registers.h"
 static const uint32_t block = 0x10000;
 static uint8_t irql;
 static unsigned retired, own_retire, other_retire;

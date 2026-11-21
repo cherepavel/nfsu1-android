@@ -22,6 +22,16 @@ than requiring users to reproduce the investigation's device properties.
 | --- | --- | --- |
 | Guest runtime executor | On | debug.nfsu.executor=0 restores the previous runtime path |
 | Dynamic-state command cache | On | debug.nfsu.state_cache=0 |
+| Direct vertex upload cache | On on Android | debug.nfsu.vertex_cache=0; 2 measures reuse without skipping uploads; next process |
+| Fused index upload | On on Android | debug.nfsu.index_fuse=0 restores the previous path; next process |
+| Descriptor allocation reuse | On on Android ordinary-descriptor path | debug.nfsu.descriptor_reuse=0 restores per-draw allocation; next process |
+| Consecutive descriptor contents | On with Android ordinary descriptor allocation reuse; exact contents/context only | debug.nfsu.descriptor_contents=0 restores update/bind calls; 2 counts matches without skipping; next process |
+| Uniform block reuse | On on Android, with per-stage backoff on misses | debug.nfsu.uniform_cache=0 restores per-draw block construction/upload; next process |
+| Bulk shader constant packets | On on Android for packets of 16–32 dwords | debug.nfsu.const_bulk=0 restores the scalar packet loop; next process |
+| Small texture sample snapshots | On on Android for 1–4 KiB source spans | debug.nfsu.tex_samples=0 restores the existing hash check; next process |
+| Paletted texture tile decoding | On on Android ARM64 for power-of-two dimensions 8–512 per axis | debug.nfsu.indexed_tiles=0 restores the previous per-pixel loop; next process |
+| Paired-channel APU low-pass filter | On on Android ARM64; nonfinite inputs use scalar fallback | debug.nfsu.apu_filter_neon=0 restores the original scalar filter; next process |
+| APU diagnostic peak scans | On on Android; skip trace-only scan when trace is absent, NEON mix-bin reduction on ARM64 with FZ off | debug.nfsu.apu_peak_opt=0 restores both original scans; next process |
 | Early reflection assembly | On on Android | debug.nfsu.cube_early=0; environment override still takes precedence |
 | Scoped render-pass consumer barrier | On on Android | debug.nfsu.pass_barrier=0, live at the next poll |
 | Early-submit draw threshold | 300, unchanged | debug.nfsu.vk_kick=N, next process |
@@ -31,6 +41,10 @@ than requiring users to reproduce the investigation's device properties.
 | GPU / cubemap timestamps | Off | existing gpu_profile / cube_profile opt-ins |
 | CPU performance counters | Off in ordinary play | debug.nfsu.perf=1, next process |
 | Detailed diagnostics | Off | debug.nfsu.diagnostics=1, next process |
+
+The Android `xbox_devbus` helper library is also compiled at `-O2`, matching
+the kernel's existing optimization policy. This is a build setting with no
+runtime property; validation is in [the device-bus report](android-devbus-o2.md).
 
 Detailed diagnostics enables CPU counters when perf is unset/empty; explicit
 perf=0 still disables them. Startup executor and profiling overrides accept

@@ -31,4 +31,37 @@ static inline uint32_t nv2a_append_indices16(uint32_t *dst, uint32_t used,
     }
     return used + 2 * pairs;
 }
+
+/* Source and mapped upload destination are disjoint. Subtract as uint32_t,
+ * then narrow exactly like the previous two-pass executor/backend path. */
+static inline void nv2a_rebase_indices16(uint16_t *dst, const uint32_t *src,
+                                        uint32_t count, uint32_t base)
+{
+    uint32_t i = 0;
+#if defined(__aarch64__)
+    uint32x4_t offset = vdupq_n_u32(base);
+    for (; count - i >= 8; i += 8) {
+        uint32x4_t lo = vsubq_u32(vld1q_u32(src + i), offset);
+        uint32x4_t hi = vsubq_u32(vld1q_u32(src + i + 4), offset);
+        vst1q_u16(dst + i, vcombine_u16(vmovn_u32(lo), vmovn_u32(hi)));
+    }
+#endif
+    for (; i < count; i++) dst[i] = (uint16_t)(src[i] - base);
+}
+
+static inline void nv2a_rebase_indices32(uint32_t *dst, const uint32_t *src,
+                                        uint32_t count, uint32_t base)
+{
+    if (!base) {
+        if (count) memcpy(dst, src, (size_t)count * sizeof(*dst));
+        return;
+    }
+    uint32_t i = 0;
+#if defined(__aarch64__)
+    uint32x4_t offset = vdupq_n_u32(base);
+    for (; count - i >= 4; i += 4)
+        vst1q_u32(dst + i, vsubq_u32(vld1q_u32(src + i), offset));
+#endif
+    for (; i < count; i++) dst[i] = src[i] - base;
+}
 #endif
